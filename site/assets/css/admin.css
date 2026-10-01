@@ -52,7 +52,7 @@ button.link:hover { text-decoration: underline; }
 button.link.danger, .danger { color: var(--danger); }
 form.inline { display: inline; margin: 0; }
 input[type=text], input[type=password], input[type=search], input[type=datetime-local], select, textarea {
-  width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text);
+  width: 100%; font: inherit; font-weight: 400; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text);
 }
 input, textarea, select { font-weight: 400; }
 textarea { resize: vertical; line-height: 1.5; }
@@ -103,6 +103,11 @@ td.actions > * { margin-left: 12px; }
 .stats strong { display: block; font-size: 1.8rem; line-height: 1.1; }
 .stats span { color: var(--muted); font-size: .88rem; }
 .add-cat { max-width: 460px; margin-bottom: 16px; }
+
+/* Autoposter */
+.autopost { margin-top: 28px; }
+.row-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
+pre.cmd { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow-x: auto; margin: 8px 0; user-select: all; }
 
 /* Login */
 .login { max-width: 360px; margin: 10vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }

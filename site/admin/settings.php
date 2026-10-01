@@ -3,14 +3,17 @@ declare(strict_types=1);
 
 require __DIR__ . '/../app/bootstrap.php';
 require APP_PATH . '/admin.php';
+require APP_PATH . '/autopost.php';
 admin_boot();
 
-$keys = ['site_name', 'tagline', 'channel_id', 'autopost_mode', 'default_og_image', 'twitter_handle', 'footer_text'];
+$keys = ['site_name', 'tagline', 'channel_id', 'autopost_mode', 'autopost_shorts', 'default_og_image', 'twitter_handle', 'footer_text'];
+$defaults = ['autopost_mode' => 'draft', 'autopost_shorts' => 'include'];
 $errors = [];
 $form = [];
 foreach ($keys as $k) {
-    $form[$k] = setting($k, $k === 'autopost_mode' ? 'draft' : '');
+    $form[$k] = setting($k, $defaults[$k] ?? '');
 }
+$oldChannel = $form['channel_id'];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
@@ -29,6 +32,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!in_array($form['autopost_mode'], ['draft', 'publish'], true)) {
         $form['autopost_mode'] = 'draft';
     }
+    if (!in_array($form['autopost_shorts'], ['include', 'skip'], true)) {
+        $form['autopost_shorts'] = 'include';
+    }
     if ($form['default_og_image'] !== '' && !preg_match('#^https?://#i', $form['default_og_image'])) {
         $errors[] = 'Varsayılan paylaşım görseli http(s):// ile başlayan bir adres olmalı.';
     }
@@ -43,6 +49,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$errors) {
         foreach ($keys as $k) {
             set_setting($k, $form[$k]);
+        }
+        if ($form['channel_id'] !== $oldChannel) {
+            // A different channel starts from a fresh baseline so its back catalogue isn't imported.
+            set_setting('autopost_baseline', '');
         }
         flash('ok', 'Ayarlar kaydedildi.');
         redirect(url('admin/settings.php'));
@@ -84,8 +94,8 @@ admin_header('Ayarlar', 'settings');
   </fieldset>
 
   <fieldset>
-    <legend>Otomatik yayın <span class="badge draft">yakında</span></legend>
-    <p class="hint">Bu ayarlar, yeni videoları kanalınızdan otomatik ekleyecek betik hazır olduğunda kullanılacak.</p>
+    <legend>Otomatik yayın</legend>
+    <p class="hint">Kanalınıza yeni video yüklendiğinde otomatik eklenir. Çalışması için aşağıdaki “Zamanlanmış görev” kurulmalıdır.</p>
     <label>YouTube kanal kimliği <span class="hint">(UC… ile başlayan 24 karakter; YouTube Studio → Ayarlar → Kanal → Gelişmiş ayarlar)</span>
       <input type="text" name="channel_id" value="<?= e($form['channel_id']) ?>" placeholder="UCxxxxxxxxxxxxxxxxxxxxxx" maxlength="24">
     </label>
@@ -95,8 +105,54 @@ admin_header('Ayarlar', 'settings');
         <option value="publish" <?= $form['autopost_mode'] === 'publish' ? 'selected' : '' ?>>Doğrudan yayınla</option>
       </select>
     </label>
+    <label>YouTube Shorts
+      <select name="autopost_shorts">
+        <option value="include" <?= $form['autopost_shorts'] === 'include' ? 'selected' : '' ?>>Shorts videolarını da ekle</option>
+        <option value="skip" <?= $form['autopost_shorts'] === 'skip' ? 'selected' : '' ?>>Shorts videolarını atla</option>
+      </select>
+    </label>
   </fieldset>
 
   <button class="btn primary">Kaydet</button>
 </form>
+
+<?php
+$lastRun = setting('autopost_last_run');
+$lastOk = setting('autopost_last_ok') === '1';
+$lastMsg = setting('autopost_last_result');
+$hasChannel = setting('channel_id') !== '';
+$cronPath = realpath(ROOT_PATH . '/cron/autopost.php') ?: (ROOT_PATH . '/cron/autopost.php');
+?>
+<section class="editor narrow autopost">
+  <h2>Otomatik yayın durumu</h2>
+  <?php if ($lastRun): ?>
+    <div class="flash <?= $lastOk ? 'ok' : 'error' ?>">
+      <strong><?= e(tr_date($lastRun, true)) ?></strong> — <?= e($lastMsg) ?>
+    </div>
+  <?php else: ?>
+    <p class="muted">Henüz hiç kontrol yapılmadı.</p>
+  <?php endif; ?>
+
+  <?php if ($hasChannel): ?>
+    <div class="row-actions">
+      <form method="post" action="autopost.php" class="inline">
+        <?= csrf_field() ?><input type="hidden" name="action" value="run">
+        <button class="btn">Şimdi kontrol et</button>
+      </form>
+      <form method="post" action="autopost.php" class="inline"
+            data-confirm="Kanaldaki son videolardan sitede olmayanların hepsi eklensin mi? (Daha önce sildikleriniz de geri gelebilir.)">
+        <?= csrf_field() ?><input type="hidden" name="action" value="import_all">
+        <button class="btn">Son videoları içe aktar</button>
+      </form>
+    </div>
+    <p class="hint">İlk kontrol hiçbir video eklemez; kanaldaki mevcut videoları “görüldü” olarak işaretler, böylece eski videolar sitenize dökülmez. Sadece sonradan yüklenenler eklenir. Eski videoları da istiyorsanız “Son videoları içe aktar”a basın (YouTube beslemesi en fazla son 15 videoyu verir).</p>
+  <?php else: ?>
+    <p class="muted">Önce yukarıya kanal kimliğini yazıp kaydedin.</p>
+  <?php endif; ?>
+
+  <h2>Zamanlanmış görev (cron)</h2>
+  <p class="hint">DirectAdmin → Gelişmiş Özellikler → Cron İşleri bölümünde yeni görev ekleyin: her 30 dakikada bir (dakika: <code>*/30</code>, diğer alanlar <code>*</code>) ve komut olarak:</p>
+  <pre class="cmd">php <?= e($cronPath) ?></pre>
+  <p class="hint">“php” yerine sunucunuzun PHP yolu gerekebilir (ör. <code>/usr/local/php82/bin/php</code>; DirectAdmin PHP Sürüm Seçici sayfasında görünür). Betik yalnızca yeni video eklediğinde veya hata olduğunda çıktı verir, bu yüzden her çalışmada e-posta gelmez.</p>
+</section>
 <?php admin_footer();
