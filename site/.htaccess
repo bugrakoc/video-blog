@@ -1,0 +1,21 @@
+AddDefaultCharset UTF-8
+Options -Indexes
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Serve real files (assets, admin scripts) directly
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # Everything else goes to the front controller
+    RewriteRule ^ index.php [L,QSA]
+</IfModule>
+
+# Block sensitive files
+<FilesMatch "\.(sql|md|log|ini|sh)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+</FilesMatch>
