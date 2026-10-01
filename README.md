@@ -11,13 +11,14 @@ Each post embeds a video, uses its YouTube thumbnail as the cover image, and has
 - Categories, search, draft posts, and static pages (e.g. About, Contact)
 - SEO: meta descriptions, canonical URLs, Open Graph / Twitter tags, `VideoObject` JSON-LD, sitemap, RSS
 - Dark mode that follows the visitor's system setting
+- Admin panel at `/admin/`: add, edit, delete, publish and schedule videos; static pages; categories; site settings
 
 ## Status
 
 | Part | State |
 |---|---|
 | Schema, router, public templates, CSS, RSS, sitemap, installer | Done |
-| Admin panel (posts, pages, categories, settings) | Planned |
+| Admin panel (posts, pages, categories, settings, password) | Done |
 | Autoposter (cron, YouTube channel RSS feed) | Planned |
 
 ## Layout
@@ -28,7 +29,7 @@ site/                  # contents go into public_html
 ├── install.php        # one-time installer (delete after use)
 ├── .htaccess          # clean URLs
 ├── assets/            # CSS, JS
-├── admin/             # admin panel (planned)
+├── admin/             # admin panel (login, videos, pages, categories, settings)
 ├── cron/              # autoposter (planned)
 └── app/               # config, DB, helpers, queries, templates (web access denied)
 ```
@@ -40,6 +41,16 @@ site/                  # contents go into public_html
 3. Edit `app/config.php`: database details and your real `base_url` (no trailing slash).
 4. Open `/install.php`, choose an admin username and password (10+ characters), and run it.
 5. Delete `install.php`.
+
+## Admin panel
+
+Log in at `/admin/` with the account created by the installer.
+
+- **Adding a video:** paste a YouTube link (watch, youtu.be, Shorts or embed URLs all work). The title is fetched automatically from YouTube's public oEmbed endpoint; paste the description into the text box yourself (the YouTube API isn't used, so no key is needed).
+- **Drafts and scheduling:** a post is public only when it is *Yayında* and its publish date is not in the future. Draft and scheduled posts can be previewed while you are logged in.
+- **Categories:** tick existing ones or type new names (comma separated) while editing a video.
+- **Static pages:** add pages like Hakkında or İletişim; tick "Menüde göster" to put them in the top menu. Reserved addresses (`admin`, `search`, `category`, ...) are renamed automatically.
+- **Settings:** site name, tagline, share image, footer text and the YouTube channel settings used by the future autoposter.
 
 ## Turkish text rules
 
@@ -55,7 +66,7 @@ Turkish content is the main reason for several design choices. Keep these when c
 
 ## Security notes
 
-- Passwords are hashed with `password_hash`. All SQL uses prepared statements, and all output goes through `e()`.
+- Passwords are hashed with `password_hash`. Login is limited to 5 failed attempts per IP per 15 minutes, sessions end after 2 hours of inactivity, and every form (including logout and delete) needs a CSRF token. All SQL uses prepared statements, and all output goes through `e()`.
 - Markdown is rendered with Parsedown in safe mode, so raw HTML in post bodies is escaped.
 - `app/` and `cron/` are denied by `.htaccess`. If DirectAdmin allows it, moving `app/` above `public_html` is even safer (update the `require` paths in `index.php` and `install.php`).
 - Never commit real credentials. Keep `app/config.php` in the repo as placeholders only.
