@@ -123,6 +123,43 @@ function import_fetch_page(string $key, string $playlistId, ?string $pageToken):
     ];
 }
 
+/**
+ * Save one video as a post unless the site already has it. Marks it as seen for the autoposter either way.
+ * $v: id, title, description, published (DB datetime|null). Returns 'imported' or 'existing'.
+ * Shared by the API import and the file import.
+ */
+function import_save_video(array $v, string $mode): string
+{
+    $pdo = db();
+    $inPosts = $pdo->prepare('SELECT 1 FROM posts WHERE youtube_id = ?');
+    $markSeen = $pdo->prepare('INSERT IGNORE INTO autopost_seen (youtube_id) VALUES (?)');
+
+    $inPosts->execute([$v['id']]);
+    if ($inPosts->fetchColumn()) {
+        $markSeen->execute([$v['id']]);
+        return 'existing';
+    }
+    try {
+        save_post([
+            'title'        => $v['title'],
+            'slug'         => '',
+            'youtube_id'   => $v['id'],
+            'body'         => description_to_markdown((string)$v['description']),
+            'status'       => $mode === 'publish' ? 'published' : 'draft',
+            'published_at' => $v['published'],
+            'source'       => 'auto',
+        ]);
+        $result = 'imported';
+    } catch (PDOException $e) {
+        if ((int)($e->errorInfo[1] ?? 0) !== 1062) {
+            throw $e;
+        }
+        $result = 'existing';                     // added by someone else meanwhile
+    }
+    $markSeen->execute([$v['id']]);
+    return $result;
+}
+
 /** Fresh import state (kept in the admin's session between requests). */
 function import_new_state(string $key, string $playlistId, string $mode): array
 {
@@ -153,9 +190,6 @@ function import_run(array &$state, float $budgetSeconds): bool
     $started = microtime(true);
     $state['error'] = null;
     try {
-        $inPosts = $pdo->prepare('SELECT 1 FROM posts WHERE youtube_id = ?');
-        $markSeen = $pdo->prepare('INSERT IGNORE INTO autopost_seen (youtube_id) VALUES (?)');
-
         do {
             $page = import_fetch_page($state['key'], $state['playlist'], $state['token']);
             if (isset($page['error'])) {
@@ -168,30 +202,7 @@ function import_run(array &$state, float $budgetSeconds): bool
             $state['unavailable'] += $page['unavailable'];
 
             foreach ($page['items'] as $v) {
-                $inPosts->execute([$v['id']]);
-                if ($inPosts->fetchColumn()) {
-                    $state['existing']++;
-                    $markSeen->execute([$v['id']]);
-                    continue;
-                }
-                try {
-                    save_post([
-                        'title'        => $v['title'],
-                        'slug'         => '',
-                        'youtube_id'   => $v['id'],
-                        'body'         => description_to_markdown($v['description']),
-                        'status'       => $state['mode'] === 'publish' ? 'published' : 'draft',
-                        'published_at' => $v['published'],
-                        'source'       => 'auto',
-                    ]);
-                    $state['imported']++;
-                } catch (PDOException $e) {
-                    if ((int)($e->errorInfo[1] ?? 0) !== 1062) {
-                        throw $e;
-                    }
-                    $state['existing']++;                 // added by someone else meanwhile
-                }
-                $markSeen->execute([$v['id']]);
+                $state[import_save_video($v, $state['mode'])]++;
             }
 
             // Only advance after the whole page is saved, so a crash re-runs this page (dedupe makes that safe).

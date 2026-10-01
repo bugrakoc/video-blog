@@ -21,7 +21,7 @@ Each post embeds a video, uses its YouTube thumbnail as the cover image, and has
 | Schema, router, public templates, CSS, RSS, sitemap, installer | Done |
 | Admin panel (posts, pages, categories, settings, password) | Done |
 | Autoposter (cron + YouTube channel feed) | Done |
-| One-time import of all older videos (YouTube Data API) | Done |
+| One-time import of all older videos (Google Takeout file, yt-dlp file or YouTube Data API) | Done |
 
 ## Layout
 
@@ -31,7 +31,7 @@ site/                  # contents go into public_html
 ├── install.php        # one-time installer (delete after use)
 ├── .htaccess          # clean URLs
 ├── assets/            # CSS, JS
-├── admin/             # admin panel (login, videos, pages, categories, settings, import)
+├── admin/             # admin panel (login, videos, pages, categories, settings, import, import-file)
 ├── cron/              # autoposter cron script (CLI only)
 └── app/               # config, DB, helpers, queries, templates (web access denied)
 ```
@@ -74,19 +74,45 @@ New uploads on your channel are imported by `cron/autopost.php`, which reads the
 
 ### Importing all older videos (one time)
 
-The channel feed only holds the latest 15 videos. To bring in the whole back catalogue (with real titles, descriptions and upload dates), use **Ayarlar → Tüm eski videoları içe aktar** (`/admin/import.php`). It uses the YouTube Data API v3, which needs a free API key:
+The channel feed only holds the latest 15 videos. To bring in the whole back catalogue (with real titles, descriptions and upload dates), use **Ayarlar → Tüm eski videoları içe aktar** (`/admin/import.php`). The page offers three methods and walks you through the one you pick. All three give the same result, and all of them need the real data: a bare list of video IDs is **not** accepted (it would only create empty posts).
+
+**1. Google Takeout file (recommended; no key, no command)**
+
+1. Open [takeout.google.com](https://takeout.google.com), deselect everything, tick *YouTube and YouTube Music*, and under *All YouTube data included* keep only **video metadata** (Turkish: *video meta verileri*). Do not tick *videos*, which would export the video files themselves.
+2. Export once as `.zip`. Google emails a download link.
+3. Upload the zip as it is (no need to unzip). If the export comes in several parts, select them all. The `.csv` inside works too.
+
+The reader works with localized Takeout headers (Turkish and English are recognised by name; any other language falls back to Takeout's fixed 28-column layout after checking the first row), UTF-8 / UTF-16 / Windows-1254 text, `,` or `;` separators, multi-line descriptions and the stray blank rows and leading spaces Takeout is known to produce. Other files in the zip (transcripts, recordings) are ignored.
+
+**2. yt-dlp output**
+
+The import page shows the exact command for your channel. It needs [yt-dlp](https://github.com/yt-dlp/yt-dlp) on your own computer:
+
+```
+yt-dlp --skip-download --ignore-no-formats-error --no-warnings \
+  --print-to-file "%(.{id,title,description,upload_date,timestamp,channel_id,availability,live_status})j" \
+  videolar.jsonl "https://www.youtube.com/playlist?list=UU<your channel ID without the UC>"
+```
+
+Upload the resulting `videolar.jsonl`. `--print-to-file` is used on purpose: shell redirection (`>`) can produce UTF-16 or mangled Turkish on Windows. A full `--dump-json` / `-J` dump also works. A `--flat-playlist` run is rejected, because it has no dates or descriptions.
+
+**3. YouTube Data API key**
 
 1. Create a project at [Google Cloud Console](https://console.cloud.google.com/projectcreate) and enable **YouTube Data API v3** (APIs & Services → Library).
 2. Credentials → Create credentials → **API key**. Restrict it to *YouTube Data API v3* only. Do **not** add an HTTP-referrer restriction (requests come from your server, not a browser).
 3. Paste the key into the import page and choose draft (recommended) or publish.
 
-Notes:
+The key is kept only in your admin session while the import runs, never in the database or in files, and you can delete it in Google Cloud afterwards. The free quota (10,000 units/day) is plenty: 50 videos cost 1 unit.
 
-- The key is kept only in your admin session while the import runs. It is never written to the database or to files, and you can delete it in Google Cloud afterwards.
-- The import runs in time-limited steps (about 20 seconds each, fewer if the host's `max_execution_time` is lower) and continues automatically, so large channels work on shared hosting. If something fails midway (quota, network), your progress is kept and you can press **Devam et** to resume.
-- Videos already on the site are skipped; private and deleted videos are not imported. Everything imported is also marked as seen for the autoposter, which then only adds videos uploaded afterwards.
-- Run it once. A video you deleted on purpose will come back if it still exists on the channel.
-- The free quota (10,000 units/day) is plenty: 50 videos cost 1 unit.
+**How file imports behave**
+
+- **Validated before anything is created.** The uploaded file is read and checked, then a preview shows how many videos will be added, how many are already on the site, the date range, the five newest titles with thumbnails, and everything that was skipped and why. Nothing touches the site until you press *İçe aktarmayı başlat*.
+- **Strict about content.** Unreadable rows, unknown privacy values and files from a different channel than the one in Settings are reported rather than guessed at. Private and deleted videos are never imported. *Unlisted* videos are listed in the preview and only imported if you tick the box. Live and not-yet-published streams are skipped.
+- **Real dates.** Takeout's publish time (or yt-dlp's upload timestamp) is converted to Istanbul time and used as the post date.
+- **Resumable.** Videos wait in a database table (`import_queue`) and are turned into posts in time-limited steps of about 20 seconds that continue automatically, so large channels work on shared hosting. If something fails or you close the tab, you do not need to upload the file again: open the import page and continue. A video leaves the queue only after its post is saved.
+- Everything imported is marked as seen for the autoposter. Unlike the API import, a file import does not mark the autoposter's baseline as complete, so videos uploaded after the file was created are not lost: use **Son videoları içe aktar** once (the completion message reminds you).
+
+Notes for all methods: videos already on the site are skipped; run the import once, because a video you deleted on purpose will come back if it is still in the file or on the channel; imported posts are drafts unless you choose to publish them.
 
 ## Turkish text rules
 
@@ -115,7 +141,7 @@ php -S 127.0.0.1:8099 router.php
 
 where `router.php` returns `false` for existing files and otherwise requires `index.php` (mimicking the `.htaccess` rewrite). Set `base_url` to `http://127.0.0.1:8099` and `debug` to `true` in your local config.
 
-To test the autoposter without YouTube, add `'autopost_feed_url' => 'http://127.0.0.1:8098/feed.xml',` to the local `app/config.php` and serve a sample Atom feed there (same structure as YouTube's). The older-video import can be pointed at a fake API with `'youtube_api_base' => 'http://127.0.0.1:8098/youtube/v3'` and made to process one page per request with `'import_time_budget' => 0`. Remove these keys afterwards. (`php -S` caches `config.php` for about 2 seconds, so wait a moment after editing it.)
+To test the autoposter without YouTube, add `'autopost_feed_url' => 'http://127.0.0.1:8098/feed.xml',` to the local `app/config.php` and serve a sample Atom feed there (same structure as YouTube's). The API import can be pointed at a fake API with `'youtube_api_base' => 'http://127.0.0.1:8098/youtube/v3'`, and both import methods can be made to process one step per request with `'import_time_budget' => 0`. File imports need no fake server: upload a Takeout zip or a yt-dlp `.jsonl` through the admin page. Remove these keys afterwards. (`php -S` caches `config.php` for about 2 seconds, so wait a moment after editing it.)
 
 ## Credits
 
