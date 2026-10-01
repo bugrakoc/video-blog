@@ -144,6 +144,7 @@ $cronPath = realpath(ROOT_PATH . '/cron/autopost.php') ?: (ROOT_PATH . '/cron/au
         <?= csrf_field() ?><input type="hidden" name="action" value="import_all">
         <button class="btn">Son videoları içe aktar</button>
       </form>
+      <a class="btn" href="import.php">Tüm eski videoları içe aktar…</a>
     </div>
     <p class="hint">İlk kontrol hiçbir video eklemez; kanaldaki mevcut videoları “görüldü” olarak işaretler, böylece eski videolar sitenize dökülmez. Sadece sonradan yüklenenler eklenir. Eski videoları da istiyorsanız “Son videoları içe aktar”a basın (YouTube beslemesi en fazla son 15 videoyu verir).</p>
   <?php else: ?>

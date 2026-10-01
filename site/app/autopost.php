@@ -75,6 +75,27 @@ function autopost_http_get(string $url): array
 }
 
 /**
+ * Convert an ISO 8601 timestamp from YouTube to a DB datetime in the site's timezone.
+ * Never returns a future time (clock skew would otherwise hide an imported video).
+ */
+function video_date_to_db(?string $iso): ?string
+{
+    $iso = trim((string)$iso);
+    if ($iso === '') {
+        return null;
+    }
+    try {
+        $dt = new DateTime($iso);
+        if ($dt->getTimestamp() > time()) {
+            $dt = new DateTime('now');
+        }
+        return $dt->setTimezone(new DateTimeZone((string)(config('timezone') ?: 'Europe/Istanbul')))->format('Y-m-d H:i:s');
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+/**
  * Parse a YouTube Atom feed. Returns entries newest-first:
  * [['id', 'title', 'published' (DB datetime|null), 'description', 'is_short'], ...]
  * Throws RuntimeException when the XML is unusable.
@@ -95,7 +116,6 @@ function autopost_parse_feed(string $xml): array
     $xp->registerNamespace('yt', 'http://www.youtube.com/xml/schemas/2015');
     $xp->registerNamespace('media', 'http://search.yahoo.com/mrss/');
 
-    $tz = new DateTimeZone((string)(config('timezone') ?: 'Europe/Istanbul'));
     $out = [];
     foreach ($xp->query('//a:entry') as $entry) {
         $id = trim((string)$xp->evaluate('string(yt:videoId)', $entry));
@@ -105,23 +125,10 @@ function autopost_parse_feed(string $xml): array
         $title = trim((string)$xp->evaluate('string(a:title)', $entry));
         $desc = (string)$xp->evaluate('string(media:group/media:description)', $entry);
         $link = (string)$xp->evaluate('string(a:link[@rel="alternate"]/@href)', $entry);
-        $published = null;
-        $pubRaw = trim((string)$xp->evaluate('string(a:published)', $entry));
-        if ($pubRaw !== '') {
-            try {
-                $dt = new DateTime($pubRaw);
-                if ($dt->getTimestamp() > time()) {
-                    $dt = new DateTime('now');   // clock skew: never schedule an import into the future
-                }
-                $published = $dt->setTimezone($tz)->format('Y-m-d H:i:s');
-            } catch (Throwable $e) {
-                $published = null;
-            }
-        }
         $out[] = [
             'id' => $id,
             'title' => mb_substr($title !== '' ? $title : 'Başlıksız video', 0, 255),
-            'published' => $published,
+            'published' => video_date_to_db(trim((string)$xp->evaluate('string(a:published)', $entry))),
             'description' => $desc,
             'is_short' => stripos($link, '/shorts/') !== false,
         ];

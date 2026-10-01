@@ -21,6 +21,7 @@ Each post embeds a video, uses its YouTube thumbnail as the cover image, and has
 | Schema, router, public templates, CSS, RSS, sitemap, installer | Done |
 | Admin panel (posts, pages, categories, settings, password) | Done |
 | Autoposter (cron + YouTube channel feed) | Done |
+| One-time import of all older videos (YouTube Data API) | Done |
 
 ## Layout
 
@@ -30,7 +31,7 @@ site/                  # contents go into public_html
 ├── install.php        # one-time installer (delete after use)
 ├── .htaccess          # clean URLs
 ├── assets/            # CSS, JS
-├── admin/             # admin panel (login, videos, pages, categories, settings)
+├── admin/             # admin panel (login, videos, pages, categories, settings, import)
 ├── cron/              # autoposter cron script (CLI only)
 └── app/               # config, DB, helpers, queries, templates (web access denied)
 ```
@@ -71,6 +72,22 @@ New uploads on your channel are imported by `cron/autopost.php`, which reads the
 - **Quiet cron:** the script prints output only when it adds videos or hits an error, so DirectAdmin doesn't email you every run. Use `-v` for a status line every time. The last result is also shown on the settings page.
 - A feed error (wrong channel ID, YouTube unreachable) is reported but never changes existing posts.
 
+### Importing all older videos (one time)
+
+The channel feed only holds the latest 15 videos. To bring in the whole back catalogue (with real titles, descriptions and upload dates), use **Ayarlar → Tüm eski videoları içe aktar** (`/admin/import.php`). It uses the YouTube Data API v3, which needs a free API key:
+
+1. Create a project at [Google Cloud Console](https://console.cloud.google.com/projectcreate) and enable **YouTube Data API v3** (APIs & Services → Library).
+2. Credentials → Create credentials → **API key**. Restrict it to *YouTube Data API v3* only. Do **not** add an HTTP-referrer restriction (requests come from your server, not a browser).
+3. Paste the key into the import page and choose draft (recommended) or publish.
+
+Notes:
+
+- The key is kept only in your admin session while the import runs. It is never written to the database or to files, and you can delete it in Google Cloud afterwards.
+- The import runs in time-limited steps (about 20 seconds each, fewer if the host's `max_execution_time` is lower) and continues automatically, so large channels work on shared hosting. If something fails midway (quota, network), your progress is kept and you can press **Devam et** to resume.
+- Videos already on the site are skipped; private and deleted videos are not imported. Everything imported is also marked as seen for the autoposter, which then only adds videos uploaded afterwards.
+- Run it once. A video you deleted on purpose will come back if it still exists on the channel.
+- The free quota (10,000 units/day) is plenty: 50 videos cost 1 unit.
+
 ## Turkish text rules
 
 Turkish content is the main reason for several design choices. Keep these when changing code:
@@ -98,7 +115,7 @@ php -S 127.0.0.1:8099 router.php
 
 where `router.php` returns `false` for existing files and otherwise requires `index.php` (mimicking the `.htaccess` rewrite). Set `base_url` to `http://127.0.0.1:8099` and `debug` to `true` in your local config.
 
-To test the autoposter without YouTube, add `'autopost_feed_url' => 'http://127.0.0.1:8098/feed.xml',` to the local `app/config.php` and serve a sample Atom feed there (same structure as YouTube's). Remove it afterwards.
+To test the autoposter without YouTube, add `'autopost_feed_url' => 'http://127.0.0.1:8098/feed.xml',` to the local `app/config.php` and serve a sample Atom feed there (same structure as YouTube's). The older-video import can be pointed at a fake API with `'youtube_api_base' => 'http://127.0.0.1:8098/youtube/v3'` and made to process one page per request with `'import_time_budget' => 0`. Remove these keys afterwards. (`php -S` caches `config.php` for about 2 seconds, so wait a moment after editing it.)
 
 ## Credits
 

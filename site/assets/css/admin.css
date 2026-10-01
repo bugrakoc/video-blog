@@ -109,6 +109,9 @@ td.actions > * { margin-left: 12px; }
 .row-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 12px 0; }
 pre.cmd { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow-x: auto; margin: 8px 0; user-select: all; }
 
+ol.steps { padding-left: 20px; } ol.steps li { margin-bottom: 8px; }
+progress { height: 14px; accent-color: var(--accent); }
+
 /* Login */
 .login { max-width: 360px; margin: 10vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
 .login h1 { margin-bottom: 16px; }

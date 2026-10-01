@@ -9,6 +9,12 @@
     }
   });
 
+  // Auto-continue long jobs: <form data-autosubmit="800"> submits itself after that many ms.
+  var auto = document.querySelector('form[data-autosubmit]');
+  if (auto) {
+    setTimeout(function () { auto.submit(); }, parseInt(auto.getAttribute('data-autosubmit'), 10) || 800);
+  }
+
   // Video editor: thumbnail preview + fetch the title from YouTube.
   var urlInput = document.getElementById('youtube_url');
   if (!urlInput) return;
