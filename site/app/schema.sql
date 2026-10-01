@@ -64,3 +64,10 @@ CREATE TABLE IF NOT EXISTS settings (
     `key` VARCHAR(60) PRIMARY KEY,
     `value` TEXT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Videos the autoposter has already handled (so deleted posts are not re-imported).
+-- Also created on demand by app/autopost.php for installs made before this table existed.
+CREATE TABLE IF NOT EXISTS autopost_seen (
+    youtube_id VARCHAR(20) NOT NULL PRIMARY KEY,
+    seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
