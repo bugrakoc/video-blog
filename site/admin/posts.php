@@ -31,7 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $status = in_array($_GET['status'] ?? '', ['published', 'draft', 'scheduled'], true) ? $_GET['status'] : '';
 $q = trim((string)($_GET['q'] ?? ''));
-$page = max(1, (int)($_GET['page'] ?? 1));
+$page = min(max(1, (int)($_GET['page'] ?? 1)), 1000000);
 [$posts, $total] = admin_list_posts($page, $status, $q);
 
 $link = fn(int $n) => 'posts.php?' . http_build_query(array_filter(['status' => $status, 'q' => $q, 'page' => $n > 1 ? $n : null]));

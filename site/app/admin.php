@@ -229,7 +229,7 @@ function admin_list_posts(int $page, string $status, string $q): array
     $total = (int)$count->fetchColumn();
 
     $per = ADMIN_PER_PAGE;
-    $offset = (max(1, $page) - 1) * $per;
+    $offset = (min(max(1, $page), 1000000) - 1) * $per;
     $stmt = db()->prepare(
         "SELECT * FROM posts WHERE $w ORDER BY COALESCE(published_at, created_at) DESC, id DESC LIMIT $per OFFSET $offset"
     );

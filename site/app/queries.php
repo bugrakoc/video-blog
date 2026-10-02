@@ -34,7 +34,7 @@ function attach_categories(array $posts): array
  */
 function list_posts(int $page, int $perPage, array $opt = []): array
 {
-    $page = max(1, $page);
+    $page = min(max(1, $page), 1000000);           // keeps OFFSET an integer (an overflow became a float and broke the SQL)
     $offset = ($page - 1) * $perPage;
     $where = [LIVE];
     $params = [];

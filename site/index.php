@@ -21,12 +21,15 @@ $path = (string)parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
 $path = trim(rawurldecode($path), '/');
 $segments = $path === '' ? [] : explode('/', $path);
 $perPage = (int)config('posts_per_page') ?: 12;
-$page = max(1, (int)($_GET['page'] ?? 1));
+// ?page=N must be 1..999999. Anything else becomes 0 and gets a 404 (huge numbers used to cause a database error).
+$rawPage = $_GET['page'] ?? '1';
+$page = $rawPage === '' ? 1 : (is_string($rawPage) && preg_match('/^[1-9][0-9]{0,5}$/', $rawPage) ? (int)$rawPage : 0);
 
 try {
     // /
     if (!$segments || $segments === ['index.php']) {
         [$posts, $total] = list_posts($page, $perPage);
+        check_page($page, $posts);
         render('list', [
             'posts' => $posts, 'total' => $total, 'page' => $page, 'perPage' => $perPage,
             'heading' => null, 'basePath' => '/',
@@ -62,6 +65,7 @@ try {
             not_found();
         }
         [$posts, $total] = list_posts($page, $perPage, ['category_id' => (int)$cat['id']]);
+        check_page($page, $posts);
         render('list', [
             'posts' => $posts, 'total' => $total, 'page' => $page, 'perPage' => $perPage,
             'heading' => 'Kategori: ' . $cat['name'], 'basePath' => '/category/' . $cat['slug'],
@@ -82,6 +86,7 @@ try {
         if ($q !== '') {
             [$posts, $total] = list_posts($page, $perPage, ['search' => mb_substr($q, 0, 100)]);
         }
+        check_page($page, $posts);
         render('list', [
             'posts' => $posts, 'total' => $total, 'page' => $page, 'perPage' => $perPage,
             'heading' => $q === '' ? 'Ara' : 'Arama: ' . $q, 'basePath' => '/search',
@@ -136,6 +141,14 @@ try {
         echo '<pre>' . e((string)$ex) . '</pre>';
     } else {
         echo 'Bir hata oluştu. Lütfen daha sonra tekrar deneyin.';
+    }
+}
+
+/** 404 for a malformed ?page value or a page past the last one (instead of an empty "page 500"). */
+function check_page(int $page, array $posts): void
+{
+    if ($page === 0 || ($page > 1 && !$posts)) {
+        not_found();
     }
 }
 
