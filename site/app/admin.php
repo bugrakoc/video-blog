@@ -55,13 +55,26 @@ function take_flashes(): array
 
 function login_recent_failures(string $ip): int
 {
-    $pdo = db();
-    $pdo->exec('DELETE FROM login_attempts WHERE attempted_at < (NOW() - INTERVAL 1 DAY)');
-    $stmt = $pdo->prepare(
+    $stmt = db()->prepare(
         'SELECT COUNT(*) FROM login_attempts WHERE ip = ? AND attempted_at > (NOW() - INTERVAL ' . LOGIN_WINDOW_MIN . ' MINUTE)'
     );
     $stmt->execute([$ip]);
     return (int)$stmt->fetchColumn();
+}
+
+/**
+ * Reserve one password attempt for $ip. Returns false when the IP is over the limit.
+ * The attempt is recorded BEFORE the password is checked and counted afterwards, so a burst of parallel
+ * requests can't all pass the check before any failure is stored. A successful login clears the record.
+ */
+function login_attempt_allowed(string $ip): bool
+{
+    db()->exec('DELETE FROM login_attempts WHERE attempted_at < (NOW() - INTERVAL 1 DAY)');
+    if (login_recent_failures($ip) >= LOGIN_MAX_ATTEMPTS) {
+        return false;
+    }
+    login_record_failure($ip);
+    return login_recent_failures($ip) <= LOGIN_MAX_ATTEMPTS;
 }
 
 function login_record_failure(string $ip): void

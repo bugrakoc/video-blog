@@ -17,23 +17,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $hash = (string)$stmt->fetchColumn();
 
     // Share the login throttle so this form can't be used to guess the current password.
-    if (login_recent_failures(client_ip()) >= LOGIN_MAX_ATTEMPTS) {
+    // login_attempt_allowed() records the attempt up front; it is cleared once the current password checks out.
+    if (!login_attempt_allowed(client_ip())) {
         $errors[] = 'Çok fazla başarısız deneme. Lütfen biraz sonra tekrar deneyin.';
     } elseif (!password_verify($current, $hash)) {
-        login_record_failure(client_ip());
         $errors[] = 'Mevcut şifre hatalı.';
-    } elseif (mb_strlen($new) < 10) {
-        $errors[] = 'Yeni şifre en az 10 karakter olmalı.';
-    } elseif ($new !== $again) {
-        $errors[] = 'Yeni şifreler eşleşmiyor.';
-    } elseif ($new === $current) {
-        $errors[] = 'Yeni şifre mevcut şifreyle aynı olamaz.';
+    } else {
+        login_clear_failures(client_ip());          // right password: a typo in the new one isn't a failed guess
+        if (mb_strlen($new) < 10) {
+            $errors[] = 'Yeni şifre en az 10 karakter olmalı.';
+        } elseif ($new !== $again) {
+            $errors[] = 'Yeni şifreler eşleşmiyor.';
+        } elseif ($new === $current) {
+            $errors[] = 'Yeni şifre mevcut şifreyle aynı olamaz.';
+        }
     }
 
     if (!$errors) {
         db()->prepare('UPDATE admins SET password_hash = ? WHERE id = ?')
             ->execute([password_hash($new, PASSWORD_DEFAULT), (int)$_SESSION['admin_id']]);
-        login_clear_failures(client_ip());
         session_regenerate_id(true);
         flash('ok', 'Şifre değiştirildi.');
         redirect(url('admin/settings.php'));

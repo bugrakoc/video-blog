@@ -16,9 +16,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $user = trim((string)($_POST['username'] ?? ''));
     $pass = (string)($_POST['password'] ?? '');
 
-    if (login_recent_failures($ip) >= LOGIN_MAX_ATTEMPTS) {
+    if (!login_attempt_allowed($ip)) {
         $error = 'Çok fazla başarısız deneme. Lütfen ' . LOGIN_WINDOW_MIN . ' dakika sonra tekrar deneyin.';
     } else {
+        // This attempt is already recorded as a failure; it is cleared below if the password is right.
         $stmt = db()->prepare('SELECT id, password_hash FROM admins WHERE username = ?');
         $stmt->execute([$user]);
         $row = $stmt->fetch();
@@ -38,7 +39,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['last_seen'] = time();
             redirect(url('admin/index.php'));
         }
-        login_record_failure($ip);
         $error = 'Kullanıcı adı veya şifre hatalı.';
     }
 }
