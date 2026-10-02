@@ -20,7 +20,9 @@ function url(string $path = ''): string
 
 function json_out($data): string
 {
-    return json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP);
+    // Invalid UTF-8 is replaced instead of making json_encode() fail (which used to crash the page).
+    $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_INVALID_UTF8_SUBSTITUTE);
+    return $json === false ? 'null' : $json;
 }
 
 function redirect(string $to, int $code = 302): never
@@ -111,7 +113,7 @@ function search_text(string $title, string $body): string
 /** Truncate on a word boundary without splitting multibyte characters. */
 function truncate(string $s, int $len = 220): string
 {
-    $s = trim(preg_replace('/\s+/u', ' ', $s));
+    $s = trim((string)preg_replace('/\s+/u', ' ', mb_scrub($s, 'UTF-8')));
     if (mb_strlen($s) <= $len) {
         return $s;
     }
@@ -120,7 +122,8 @@ function truncate(string $s, int $len = 220): string
     if ($sp !== false && $sp > $len * 0.6) {
         $cut = mb_substr($cut, 0, $sp);
     }
-    return rtrim($cut, " ,.;:-–—") . '…';
+    // Character-aware trim: rtrim() works on bytes and used to cut emojis (and À, Ó, Ô...) in half.
+    return (string)preg_replace('/[\s,.;:\-–—]+$/u', '', $cut) . '…';
 }
 
 /* ---------- Markdown ---------- */
