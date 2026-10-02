@@ -11,12 +11,14 @@ if (is_admin()) {
 
 $error = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    csrf_check();
     $ip = client_ip();
-    $user = trim((string)($_POST['username'] ?? ''));
-    $pass = (string)($_POST['password'] ?? '');
+    $user = trim(is_string($_POST['username'] ?? null) ? $_POST['username'] : '');
+    $pass = is_string($_POST['password'] ?? null) ? $_POST['password'] : '';
 
-    if (!login_attempt_allowed($ip)) {
+    if (!csrf_valid()) {
+        // Usually a login page left open until its session expired: just show the form again with a fresh token.
+        $error = 'Sayfanın süresi dolmuş. Lütfen tekrar giriş yapın.';
+    } elseif (!login_attempt_allowed($ip)) {
         $error = 'Çok fazla başarısız deneme. Lütfen ' . LOGIN_WINDOW_MIN . ' dakika sonra tekrar deneyin.';
     } else {
         // This attempt is already recorded as a failure; it is cleared below if the password is right.

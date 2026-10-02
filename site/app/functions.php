@@ -250,6 +250,7 @@ function set_setting(string $key, string $value): void
 /* ---------- Sessions, CSRF, auth ---------- */
 
 const SESSION_NAME = 'vbsid';
+const ADMIN_IDLE_SECONDS = 7200;   // admin auto-logout after 2 hours of inactivity
 
 function start_session(): void
 {
@@ -257,6 +258,11 @@ function start_session(): void
         return;
     }
     $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+    // PHP's default garbage collection deletes session files after 24 idle minutes, which logged the admin out
+    // long before the 2-hour idle limit. Keep them at least that long (the idle limit itself is enforced in admin_boot()).
+    if ((int)ini_get('session.gc_maxlifetime') < ADMIN_IDLE_SECONDS) {
+        ini_set('session.gc_maxlifetime', (string)ADMIN_IDLE_SECONDS);
+    }
     session_name(SESSION_NAME);
     session_set_cookie_params([
         'lifetime' => 0,
@@ -282,14 +288,34 @@ function csrf_field(): string
     return '<input type="hidden" name="_csrf" value="' . e(csrf_token()) . '">';
 }
 
-function csrf_check(): void
+function csrf_valid(): bool
 {
     start_session();
-    $sent = (string)($_POST['_csrf'] ?? '');
-    if ($sent === '' || !hash_equals((string)($_SESSION['csrf'] ?? ''), $sent)) {
-        http_response_code(400);
-        exit('Geçersiz istek (CSRF).');
+    $sent = $_POST['_csrf'] ?? '';
+    return is_string($sent) && $sent !== '' && hash_equals((string)($_SESSION['csrf'] ?? ''), $sent);
+}
+
+/** Stop a form submission whose CSRF token is missing or stale, with a page that says what to do next. */
+function csrf_check(): void
+{
+    if (csrf_valid()) {
+        return;
     }
+    http_response_code(400);
+    header('Content-Type: text/html; charset=utf-8');
+    header('Cache-Control: no-store');
+    $loggedIn = !empty($_SESSION['admin_id']);
+    echo '<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+       . '<meta name="robots" content="noindex"><title>İstek doğrulanamadı</title></head>'
+       . '<body style="font:16px/1.6 system-ui,sans-serif;max-width:560px;margin:40px auto;padding:0 16px">'
+       . '<h1 style="font-size:1.3em">İstek doğrulanamadı</h1>'
+       . '<p>Form gönderilemedi, çünkü güvenlik doğrulaması geçersiz. Genellikle oturumun süresi dolduğunda ya da sayfa çok uzun süre açık kaldığında olur.</p>'
+       . '<p>Tarayıcının <strong>geri</strong> düğmesiyle forma dönün: yazdıklarınız çoğunlukla yerinde durur. Metni kopyalayıp sayfayı yenileyin'
+       . ($loggedIn ? '' : ' (gerekirse tekrar giriş yapın)') . ' ve yeniden gönderin.</p>'
+       . '<p><a href="javascript:history.back()">← Geri dön</a>'
+       . ($loggedIn ? '' : ' · <a href="' . e(url('admin/login.php')) . '">Giriş yap</a>') . '</p>'
+       . '</body></html>';
+    exit;
 }
 
 function is_admin(): bool

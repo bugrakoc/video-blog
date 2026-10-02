@@ -5,8 +5,8 @@ declare(strict_types=1);
 
 const LOGIN_MAX_ATTEMPTS = 5;      // failed attempts allowed ...
 const LOGIN_WINDOW_MIN = 15;       // ... within this many minutes, per IP
-const ADMIN_IDLE_SECONDS = 7200;   // auto-logout after 2 hours of inactivity
 const ADMIN_PER_PAGE = 25;
+// ADMIN_IDLE_SECONDS (auto-logout after inactivity) is in functions.php, because start_session() needs it.
 
 /** Common setup for every admin script: headers, session, idle timeout, auth. */
 function admin_boot(bool $requireLogin = true): void
