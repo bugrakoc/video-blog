@@ -87,6 +87,20 @@ function login_clear_failures(string $ip): void
     db()->prepare('DELETE FROM login_attempts WHERE ip = ?')->execute([$ip]);
 }
 
+/**
+ * A throwaway hash made with the current default algorithm and cost, checked when the username doesn't exist,
+ * so a wrong username takes as long as a wrong password (a fixed cost-12 hash made unknown names ~4x slower).
+ */
+function login_dummy_hash(): string
+{
+    $h = setting('login_dummy_hash');
+    if ($h === '' || password_needs_rehash($h, PASSWORD_DEFAULT)) {
+        $h = password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT);
+        set_setting('login_dummy_hash', $h);
+    }
+    return $h;
+}
+
 /* ---------- Layout ---------- */
 
 function admin_header(string $title, string $active = ''): void

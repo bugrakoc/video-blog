@@ -24,9 +24,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt->execute([$user]);
         $row = $stmt->fetch();
 
-        // Always run password_verify so response time doesn't reveal whether the user exists.
-        static $dummy = '$2y$12$MkGdGlLvonAJ8dXD2Egc2OmO.A3qewtUVdImk1YjC5Y.klXya71SG';
-        $ok = password_verify($pass, $row['password_hash'] ?? $dummy) && $row;
+        // Always run password_verify (with a hash of the same cost) so response time doesn't reveal whether the user exists.
+        $ok = password_verify($pass, $row ? $row['password_hash'] : login_dummy_hash()) && $row;
 
         if ($ok) {
             login_clear_failures($ip);
