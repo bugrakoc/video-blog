@@ -93,8 +93,8 @@ admin_header($isNew ? 'Yeni video' : 'Videoyu düzenle', 'posts');
 <div class="head">
   <h1><?= $isNew ? 'Yeni video' : 'Videoyu düzenle' ?></h1>
   <?php if ($post): ?>
-    <a class="btn" target="_blank" rel="noopener" href="<?= e(url('post/' . $post['slug'] . ($post['status'] === 'draft' ? '?preview=1' : ''))) ?>">
-      <?= $post['status'] === 'draft' ? 'Önizle' : 'Sayfayı gör' ?> ↗
+    <a class="btn" target="_blank" rel="noopener" href="<?= e(admin_post_view_url($post)) ?>">
+      <?= post_is_live($post) ? 'Sayfayı gör' : 'Önizle' ?> ↗
     </a>
   <?php endif; ?>
 </div>

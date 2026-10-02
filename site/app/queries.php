@@ -3,6 +3,13 @@ declare(strict_types=1);
 
 const LIVE = "p.status = 'published' AND (p.published_at IS NULL OR p.published_at <= NOW())";
 
+/** PHP twin of LIVE: published and not scheduled for the future. */
+function post_is_live(array $p): bool
+{
+    return $p['status'] === 'published'
+        && (empty($p['published_at']) || strtotime((string)$p['published_at']) <= time());
+}
+
 /** Attach a 'categories' array (id, name, slug) to each post row. */
 function attach_categories(array $posts): array
 {

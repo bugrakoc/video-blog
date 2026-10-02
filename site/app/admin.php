@@ -201,10 +201,16 @@ function post_state(array $p): array
     if ($p['status'] === 'draft') {
         return ['Taslak', 'draft'];
     }
-    if (!empty($p['published_at']) && strtotime($p['published_at']) > time()) {
+    if (!post_is_live($p)) {
         return ['Zamanlanmış', 'scheduled'];
     }
     return ['Yayında', 'live'];
+}
+
+/** Public URL of a post; drafts and scheduled posts get ?preview=1 (they 404 for everyone else). */
+function admin_post_view_url(array $p): string
+{
+    return url('post/' . $p['slug'] . (post_is_live($p) ? '' : '?preview=1'));
 }
 
 /** Paginated admin list (includes drafts and scheduled). Returns [rows, total]. */

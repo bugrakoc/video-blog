@@ -51,7 +51,7 @@ try {
             header('Cache-Control: private, no-store');
         }
         render('post', [
-            'post' => $post, 'preview' => $preview && $post['status'] !== 'published',
+            'post' => $post, 'preview' => $preview && !post_is_live($post),
             'related' => related_posts((int)$post['id']),
             'meta' => post_meta($post),
         ]);
@@ -167,7 +167,7 @@ function post_meta(array $post): array
         'type' => 'article',
         'published' => date('c', strtotime($published)),
         'video' => yt_embed_url($post['youtube_id']),
-        'robots' => $post['status'] === 'published' ? 'index,follow' : 'noindex,nofollow',
+        'robots' => post_is_live($post) ? 'index,follow' : 'noindex,nofollow',
         'jsonld' => [
             '@context' => 'https://schema.org',
             '@type' => 'VideoObject',

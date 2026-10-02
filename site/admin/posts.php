@@ -72,7 +72,7 @@ admin_header('Videolar', 'posts');
         <td><span class="badge <?= $cls ?>"><?= e($label) ?></span></td>
         <td class="actions">
           <a href="post-edit.php?id=<?= (int)$p['id'] ?>">Düzenle</a>
-          <a href="<?= e(url('post/' . $p['slug'] . ($p['status'] === 'draft' ? '?preview=1' : ''))) ?>" target="_blank" rel="noopener"><?= $p['status'] === 'draft' ? 'Önizle' : 'Gör' ?> ↗</a>
+          <a href="<?= e(admin_post_view_url($p)) ?>" target="_blank" rel="noopener"><?= post_is_live($p) ? 'Gör' : 'Önizle' ?> ↗</a>
           <form method="post" class="inline">
             <?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$p['id'] ?>">
             <?php if ($p['status'] === 'draft'): ?>

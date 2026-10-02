@@ -4,7 +4,11 @@ $when = $post['published_at'] ?: $post['created_at'];
 ?>
 <article class="post">
   <?php if ($preview): ?>
-    <p class="notice">Önizleme: bu yazı henüz yayında değil.</p>
+    <?php if ($post['status'] === 'draft'): ?>
+      <p class="notice">Önizleme: bu yazı taslak, henüz yayında değil.</p>
+    <?php else: ?>
+      <p class="notice">Önizleme: bu yazı <?= e(tr_date($post['published_at'], true)) ?> tarihinde yayına girecek.</p>
+    <?php endif; ?>
   <?php endif; ?>
   <h1><?= e($post['title']) ?></h1>
   <p class="meta">
