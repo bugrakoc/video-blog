@@ -67,7 +67,7 @@ New uploads on your channel are imported by `cron/autopost.php`, which reads the
 
 - **First check imports nothing.** It only marks the videos already on your channel as seen, so your homepage isn't flooded with old videos. Only videos uploaded afterwards are added. Use **Son videoları içe aktar** (or `php cron/autopost.php --import-all`) to also import the latest ones (the feed holds at most 15).
 - **No duplicates, no resurrections.** A video already on the site (even one you added by hand) is skipped, and a video you delete won't come back on the next run. Changing the channel ID starts a fresh baseline.
-- **Imported posts** use the video's real upload date, `source = auto`, and the description as the body (hashtags stay plain text rather than becoming headings). Review them in the post list and add categories before publishing.
+- **Imported posts** use the video's real upload date, `source = auto`, and the description as the body. The description stays plain text: hashtags, `-----` / `=====` separator lines, numbered or dashed lines and indentation are escaped so they don't turn into headings, lists or code blocks. Review them in the post list and add categories before publishing.
 - **Shorts** can be included or skipped (setting).
 - **Quiet cron:** the script prints output only when it adds videos or hits an error, so DirectAdmin doesn't email you every run. Use `-v` for a status line every time. The last result is also shown on the settings page.
 - A feed error (wrong channel ID, YouTube unreachable) is reported but never changes existing posts.

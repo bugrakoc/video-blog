@@ -106,7 +106,7 @@ function is_reserved_slug(string $slug): bool
 /** Accent-folded text stored next to each post for searching. */
 function search_text(string $title, string $body): string
 {
-    $plain = strip_tags(markdown_html($body));
+    $plain = html_entity_decode(strip_tags(markdown_html($body)), ENT_QUOTES | ENT_HTML5, 'UTF-8');
     return fold($title . ' ' . $plain);
 }
 
