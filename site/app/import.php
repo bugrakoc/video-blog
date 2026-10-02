@@ -81,10 +81,11 @@ function yt_api_get(string $endpoint, array $params): array
 
 /**
  * One page (up to 50) of the uploads playlist.
- * Returns ['items' => [...], 'next' => token|null, 'total' => int, 'unavailable' => int] or ['error' => msg].
+ * Returns ['items' => [...], 'next' => token|null, 'total' => int, 'unavailable' => int, 'unlisted' => int] or ['error' => msg].
  * Items: id, title, description, published (DB datetime|null).
+ * Unlisted videos are only included when $includeUnlisted is true (they would become public posts).
  */
-function import_fetch_page(string $key, string $playlistId, ?string $pageToken): array
+function import_fetch_page(string $key, string $playlistId, ?string $pageToken, bool $includeUnlisted = false): array
 {
     [$json, $err] = yt_api_get('playlistItems', [
         'part' => 'snippet,contentDetails,status',
@@ -98,14 +99,19 @@ function import_fetch_page(string $key, string $playlistId, ?string $pageToken):
     }
     $items = [];
     $unavailable = 0;
+    $unlisted = 0;
     foreach ((array)($json['items'] ?? []) as $it) {
         $id = (string)($it['contentDetails']['videoId'] ?? '');
         $title = trim((string)($it['snippet']['title'] ?? ''));
         $privacy = (string)($it['status']['privacyStatus'] ?? 'public');
         // Deleted and private videos stay in the playlist as placeholders.
-        if (!preg_match('/^[A-Za-z0-9_-]{11}$/', $id) || $privacy === 'private'
+        if (!preg_match('/^[A-Za-z0-9_-]{11}$/', $id) || !in_array($privacy, ['public', 'unlisted'], true)
             || in_array($title, ['Private video', 'Deleted video'], true)) {
             $unavailable++;
+            continue;
+        }
+        if ($privacy === 'unlisted' && !$includeUnlisted) {
+            $unlisted++;
             continue;
         }
         $items[] = [
@@ -120,6 +126,7 @@ function import_fetch_page(string $key, string $playlistId, ?string $pageToken):
         'next' => !empty($json['nextPageToken']) ? (string)$json['nextPageToken'] : null,
         'total' => (int)($json['pageInfo']['totalResults'] ?? 0),
         'unavailable' => $unavailable,
+        'unlisted' => $unlisted,
     ];
 }
 
@@ -161,12 +168,13 @@ function import_save_video(array $v, string $mode): string
 }
 
 /** Fresh import state (kept in the admin's session between requests). */
-function import_new_state(string $key, string $playlistId, string $mode): array
+function import_new_state(string $key, string $playlistId, string $mode, bool $includeUnlisted = false): array
 {
     return [
         'key' => $key, 'playlist' => $playlistId, 'mode' => $mode === 'publish' ? 'publish' : 'draft',
+        'include_unlisted' => $includeUnlisted,
         'token' => null, 'pages' => 0, 'total' => 0,
-        'imported' => 0, 'existing' => 0, 'unavailable' => 0,
+        'imported' => 0, 'existing' => 0, 'unavailable' => 0, 'skipped_unlisted' => 0,
         'done' => false, 'error' => null,
     ];
 }
@@ -191,7 +199,7 @@ function import_run(array &$state, float $budgetSeconds): bool
     $state['error'] = null;
     try {
         do {
-            $page = import_fetch_page($state['key'], $state['playlist'], $state['token']);
+            $page = import_fetch_page($state['key'], $state['playlist'], $state['token'], !empty($state['include_unlisted']));
             if (isset($page['error'])) {
                 $state['error'] = $page['error'];
                 return false;
@@ -200,6 +208,7 @@ function import_run(array &$state, float $budgetSeconds): bool
                 $state['total'] = $page['total'];
             }
             $state['unavailable'] += $page['unavailable'];
+            $state['skipped_unlisted'] = ($state['skipped_unlisted'] ?? 0) + $page['unlisted'];
 
             foreach ($page['items'] as $v) {
                 $state[import_save_video($v, $state['mode'])]++;

@@ -100,7 +100,7 @@ Upload the resulting `videolar.jsonl`. `--print-to-file` is used on purpose: she
 
 1. Create a project at [Google Cloud Console](https://console.cloud.google.com/projectcreate) and enable **YouTube Data API v3** (APIs & Services → Library).
 2. Credentials → Create credentials → **API key**. Restrict it to *YouTube Data API v3* only. Do **not** add an HTTP-referrer restriction (requests come from your server, not a browser).
-3. Paste the key into the import page and choose draft (recommended) or publish.
+3. Paste the key into the import page and choose draft (recommended) or publish. Private and deleted videos are never imported; *unlisted* videos are skipped unless you tick *Liste dışı videoları da ekle* (they would become public posts).
 
 The key is kept only in your admin session while the import runs, never in the database or in files, and you can delete it in Google Cloud afterwards. The free quota (10,000 units/day) is plenty: 50 videos cost 1 unit.
 
