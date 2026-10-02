@@ -15,6 +15,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         flash('error', 'Video bulunamadı.');
     } elseif ($action === 'delete') {
         db()->prepare('DELETE FROM posts WHERE id = ?')->execute([$id]);
+        mark_video_seen($post['youtube_id']);      // a deleted video must not be re-imported by the autoposter
         flash('ok', 'Silindi: ' . $post['title']);
     } elseif ($action === 'publish') {
         db()->prepare(

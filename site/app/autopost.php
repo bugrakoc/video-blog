@@ -8,16 +8,7 @@ declare(strict_types=1);
 
 const AUTOPOST_LOCK = 'videoblog_autopost';
 
-/** Table of every video the autoposter has already handled, so deleted posts don't come back. */
-function autopost_ensure_schema(): void
-{
-    db()->exec(
-        'CREATE TABLE IF NOT EXISTS autopost_seen (
-            youtube_id VARCHAR(20) NOT NULL PRIMARY KEY,
-            seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
-    );
-}
+// autopost_ensure_schema() and mark_video_seen() live in queries.php, because the admin panel also needs them.
 
 function autopost_feed_url(string $channelId): string
 {

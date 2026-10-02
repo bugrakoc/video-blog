@@ -74,6 +74,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'source'           => $post['source'] ?? 'manual',
             'category_ids'     => $cats,
         ], $id ?: null);
+        if ($post && $post['youtube_id'] !== $ytId) {
+            mark_video_seen($post['youtube_id']);   // the old video was removed from the site on purpose
+        }
         $saved = get_post($newId);
         $msg = $id ? 'Kaydedildi.' : 'Video eklendi.';
         if ($saved && $form['slug'] !== '' && slugify($form['slug']) !== $saved['slug']) {

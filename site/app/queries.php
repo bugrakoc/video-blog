@@ -220,6 +220,27 @@ function save_post(array $data, ?int $id = null): int
     return $id;
 }
 
+/** Table of every video the autoposter has already handled, so deleted posts don't come back. */
+function autopost_ensure_schema(): void
+{
+    db()->exec(
+        'CREATE TABLE IF NOT EXISTS autopost_seen (
+            youtube_id VARCHAR(20) NOT NULL PRIMARY KEY,
+            seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+    );
+}
+
+/**
+ * Remember a video as handled, so the autoposter never re-creates it. Called when a post is deleted or
+ * pointed at a different video (otherwise a video removed before the next cron run would come back).
+ */
+function mark_video_seen(string $youtubeId): void
+{
+    autopost_ensure_schema();
+    db()->prepare('INSERT IGNORE INTO autopost_seen (youtube_id) VALUES (?)')->execute([$youtubeId]);
+}
+
 function sync_post_categories(int $postId, array $categoryIds): void
 {
     $pdo = db();
