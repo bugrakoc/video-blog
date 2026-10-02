@@ -3,6 +3,13 @@ declare(strict_types=1);
 
 const LIVE = "p.status = 'published' AND (p.published_at IS NULL OR p.published_at <= NOW())";
 
+/** PHP twin of LIVE: published and not scheduled for the future. */
+function post_is_live(array $p): bool
+{
+    return $p['status'] === 'published'
+        && (empty($p['published_at']) || strtotime((string)$p['published_at']) <= time());
+}
+
 /** Attach a 'categories' array (id, name, slug) to each post row. */
 function attach_categories(array $posts): array
 {
@@ -34,7 +41,7 @@ function attach_categories(array $posts): array
  */
 function list_posts(int $page, int $perPage, array $opt = []): array
 {
-    $page = max(1, $page);
+    $page = min(max(1, $page), 1000000);           // keeps OFFSET an integer (an overflow became a float and broke the SQL)
     $offset = ($page - 1) * $perPage;
     $where = [LIVE];
     $params = [];
@@ -218,6 +225,27 @@ function save_post(array $data, ?int $id = null): int
         sync_post_categories($id, array_map('intval', $data['category_ids']));
     }
     return $id;
+}
+
+/** Table of every video the autoposter has already handled, so deleted posts don't come back. */
+function autopost_ensure_schema(): void
+{
+    db()->exec(
+        'CREATE TABLE IF NOT EXISTS autopost_seen (
+            youtube_id VARCHAR(20) NOT NULL PRIMARY KEY,
+            seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+    );
+}
+
+/**
+ * Remember a video as handled, so the autoposter never re-creates it. Called when a post is deleted or
+ * pointed at a different video (otherwise a video removed before the next cron run would come back).
+ */
+function mark_video_seen(string $youtubeId): void
+{
+    autopost_ensure_schema();
+    db()->prepare('INSERT IGNORE INTO autopost_seen (youtube_id) VALUES (?)')->execute([$youtubeId]);
 }
 
 function sync_post_categories(int $postId, array $categoryIds): void

@@ -14,6 +14,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     session_destroy();
     start_session();
+    session_regenerate_id(true);    // sends a fresh cookie, so the message below survives the cookie deletion above
     flash('ok', 'Çıkış yapıldı.');
     redirect(url('admin/login.php'));
 }

@@ -67,7 +67,7 @@ New uploads on your channel are imported by `cron/autopost.php`, which reads the
 
 - **First check imports nothing.** It only marks the videos already on your channel as seen, so your homepage isn't flooded with old videos. Only videos uploaded afterwards are added. Use **Son videoları içe aktar** (or `php cron/autopost.php --import-all`) to also import the latest ones (the feed holds at most 15).
 - **No duplicates, no resurrections.** A video already on the site (even one you added by hand) is skipped, and a video you delete won't come back on the next run. Changing the channel ID starts a fresh baseline.
-- **Imported posts** use the video's real upload date, `source = auto`, and the description as the body (hashtags stay plain text rather than becoming headings). Review them in the post list and add categories before publishing.
+- **Imported posts** use the video's real upload date, `source = auto`, and the description as the body. The description stays plain text: hashtags, `-----` / `=====` separator lines, numbered or dashed lines and indentation are escaped so they don't turn into headings, lists or code blocks. Review them in the post list and add categories before publishing.
 - **Shorts** can be included or skipped (setting).
 - **Quiet cron:** the script prints output only when it adds videos or hits an error, so DirectAdmin doesn't email you every run. Use `-v` for a status line every time. The last result is also shown on the settings page.
 - A feed error (wrong channel ID, YouTube unreachable) is reported but never changes existing posts.
@@ -100,7 +100,7 @@ Upload the resulting `videolar.jsonl`. `--print-to-file` is used on purpose: she
 
 1. Create a project at [Google Cloud Console](https://console.cloud.google.com/projectcreate) and enable **YouTube Data API v3** (APIs & Services → Library).
 2. Credentials → Create credentials → **API key**. Restrict it to *YouTube Data API v3* only. Do **not** add an HTTP-referrer restriction (requests come from your server, not a browser).
-3. Paste the key into the import page and choose draft (recommended) or publish.
+3. Paste the key into the import page and choose draft (recommended) or publish. Private and deleted videos are never imported; *unlisted* videos are skipped unless you tick *Liste dışı videoları da ekle* (they would become public posts).
 
 The key is kept only in your admin session while the import runs, never in the database or in files, and you can delete it in Google Cloud afterwards. The free quota (10,000 units/day) is plenty: 50 videos cost 1 unit.
 
@@ -128,7 +128,9 @@ Turkish content is the main reason for several design choices. Keep these when c
 
 ## Security notes
 
-- Passwords are hashed with `password_hash`. Login is limited to 5 failed attempts per IP per 15 minutes, sessions end after 2 hours of inactivity, and every form (including logout and delete) needs a CSRF token. All SQL uses prepared statements, and all output goes through `e()`.
+- Passwords are hashed with `password_hash`. Login is limited to 5 failed attempts per IP per 15 minutes (each attempt is recorded before the password is checked, so parallel requests can't get around the limit), and an unknown username takes as long to reject as a wrong password. Sessions end after 2 hours of inactivity, and changing the password logs out every other session. Every form (including logout and delete) needs a CSRF token. All SQL uses prepared statements, and all output goes through `e()`.
+- `install.php` refuses to run once an admin account exists, even if `app/installed.lock` is lost (for example after re-uploading `app/`). Still delete `install.php` after installing.
+- Public pages never start a session (no cookie for visitors); only `?preview=1` links opened by a logged-in admin do.
 - Markdown is rendered with Parsedown in safe mode, so raw HTML in post bodies is escaped.
 - `app/` and `cron/` are denied by `.htaccess`. If DirectAdmin allows it, moving `app/` above `public_html` is even safer (update the `require` paths in `index.php` and `install.php`).
 - Never commit real credentials. Keep `app/config.php` in the repo as placeholders only.

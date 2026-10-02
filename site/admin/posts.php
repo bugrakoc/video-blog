@@ -15,6 +15,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         flash('error', 'Video bulunamadı.');
     } elseif ($action === 'delete') {
         db()->prepare('DELETE FROM posts WHERE id = ?')->execute([$id]);
+        mark_video_seen($post['youtube_id']);      // a deleted video must not be re-imported by the autoposter
         flash('ok', 'Silindi: ' . $post['title']);
     } elseif ($action === 'publish') {
         db()->prepare(
@@ -29,8 +30,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $status = in_array($_GET['status'] ?? '', ['published', 'draft', 'scheduled'], true) ? $_GET['status'] : '';
-$q = trim((string)($_GET['q'] ?? ''));
-$page = max(1, (int)($_GET['page'] ?? 1));
+$q = trim(is_string($_GET['q'] ?? null) ? $_GET['q'] : '');
+$page = min(max(1, (int)($_GET['page'] ?? 1)), 1000000);
 [$posts, $total] = admin_list_posts($page, $status, $q);
 
 $link = fn(int $n) => 'posts.php?' . http_build_query(array_filter(['status' => $status, 'q' => $q, 'page' => $n > 1 ? $n : null]));
@@ -71,7 +72,7 @@ admin_header('Videolar', 'posts');
         <td><span class="badge <?= $cls ?>"><?= e($label) ?></span></td>
         <td class="actions">
           <a href="post-edit.php?id=<?= (int)$p['id'] ?>">Düzenle</a>
-          <a href="<?= e(url('post/' . $p['slug'] . ($p['status'] === 'draft' ? '?preview=1' : ''))) ?>" target="_blank" rel="noopener"><?= $p['status'] === 'draft' ? 'Önizle' : 'Gör' ?> ↗</a>
+          <a href="<?= e(admin_post_view_url($p)) ?>" target="_blank" rel="noopener"><?= post_is_live($p) ? 'Gör' : 'Önizle' ?> ↗</a>
           <form method="post" class="inline">
             <?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$p['id'] ?>">
             <?php if ($p['status'] === 'draft'): ?>

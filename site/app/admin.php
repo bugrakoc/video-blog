@@ -5,8 +5,8 @@ declare(strict_types=1);
 
 const LOGIN_MAX_ATTEMPTS = 5;      // failed attempts allowed ...
 const LOGIN_WINDOW_MIN = 15;       // ... within this many minutes, per IP
-const ADMIN_IDLE_SECONDS = 7200;   // auto-logout after 2 hours of inactivity
 const ADMIN_PER_PAGE = 25;
+// ADMIN_IDLE_SECONDS (auto-logout after inactivity) is in functions.php, because start_session() needs it.
 
 /** Common setup for every admin script: headers, session, idle timeout, auth. */
 function admin_boot(bool $requireLogin = true): void
@@ -21,11 +21,16 @@ function admin_boot(bool $requireLogin = true): void
     start_session();
     if (!empty($_SESSION['admin_id'])) {
         $now = time();
-        if ($now - (int)($_SESSION['last_seen'] ?? $now) > ADMIN_IDLE_SECONDS) {
+        $expired = $now - (int)($_SESSION['last_seen'] ?? $now) > ADMIN_IDLE_SECONDS;
+        $revoked = !$expired && !admin_session_matches_password();
+        if ($expired || $revoked) {
             session_unset();
             session_destroy();
             start_session();
-            flash('error', 'Oturum süresi doldu. Lütfen tekrar giriş yapın.');
+            session_regenerate_id(true);
+            flash('error', $expired
+                ? 'Oturum süresi doldu. Lütfen tekrar giriş yapın.'
+                : 'Şifre değiştirildiği için oturum kapatıldı. Lütfen tekrar giriş yapın.');
         } else {
             $_SESSION['last_seen'] = $now;
         }
@@ -33,6 +38,34 @@ function admin_boot(bool $requireLogin = true): void
     if ($requireLogin) {
         require_admin();
     }
+}
+
+/* ---------- Session ↔ password binding ---------- */
+
+/** Value stored in the session at login. Changing the password changes it, which ends every other session. */
+function admin_password_fingerprint(string $passwordHash): string
+{
+    return hash('sha256', 'vb-session|' . $passwordHash);
+}
+
+/** Mark the current session as logged in as $adminId (whose current hash is $passwordHash). */
+function admin_session_login(int $adminId, string $passwordHash): void
+{
+    session_regenerate_id(true);
+    unset($_SESSION['csrf']);                     // fresh CSRF token for the logged-in session
+    $_SESSION['admin_id'] = $adminId;
+    $_SESSION['admin_pw'] = admin_password_fingerprint($passwordHash);
+    $_SESSION['last_seen'] = time();
+}
+
+/** False when the account is gone or its password changed after this session logged in. */
+function admin_session_matches_password(): bool
+{
+    $stmt = db()->prepare('SELECT password_hash FROM admins WHERE id = ?');
+    $stmt->execute([(int)$_SESSION['admin_id']]);
+    $hash = $stmt->fetchColumn();
+    return is_string($hash)
+        && hash_equals(admin_password_fingerprint($hash), (string)($_SESSION['admin_pw'] ?? ''));
 }
 
 /* ---------- Flash messages ---------- */
@@ -55,13 +88,26 @@ function take_flashes(): array
 
 function login_recent_failures(string $ip): int
 {
-    $pdo = db();
-    $pdo->exec('DELETE FROM login_attempts WHERE attempted_at < (NOW() - INTERVAL 1 DAY)');
-    $stmt = $pdo->prepare(
+    $stmt = db()->prepare(
         'SELECT COUNT(*) FROM login_attempts WHERE ip = ? AND attempted_at > (NOW() - INTERVAL ' . LOGIN_WINDOW_MIN . ' MINUTE)'
     );
     $stmt->execute([$ip]);
     return (int)$stmt->fetchColumn();
+}
+
+/**
+ * Reserve one password attempt for $ip. Returns false when the IP is over the limit.
+ * The attempt is recorded BEFORE the password is checked and counted afterwards, so a burst of parallel
+ * requests can't all pass the check before any failure is stored. A successful login clears the record.
+ */
+function login_attempt_allowed(string $ip): bool
+{
+    db()->exec('DELETE FROM login_attempts WHERE attempted_at < (NOW() - INTERVAL 1 DAY)');
+    if (login_recent_failures($ip) >= LOGIN_MAX_ATTEMPTS) {
+        return false;
+    }
+    login_record_failure($ip);
+    return login_recent_failures($ip) <= LOGIN_MAX_ATTEMPTS;
 }
 
 function login_record_failure(string $ip): void
@@ -72,6 +118,20 @@ function login_record_failure(string $ip): void
 function login_clear_failures(string $ip): void
 {
     db()->prepare('DELETE FROM login_attempts WHERE ip = ?')->execute([$ip]);
+}
+
+/**
+ * A throwaway hash made with the current default algorithm and cost, checked when the username doesn't exist,
+ * so a wrong username takes as long as a wrong password (a fixed cost-12 hash made unknown names ~4x slower).
+ */
+function login_dummy_hash(): string
+{
+    $h = setting('login_dummy_hash');
+    if ($h === '' || password_needs_rehash($h, PASSWORD_DEFAULT)) {
+        $h = password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT);
+        set_setting('login_dummy_hash', $h);
+    }
+    return $h;
 }
 
 /* ---------- Layout ---------- */
@@ -141,10 +201,16 @@ function post_state(array $p): array
     if ($p['status'] === 'draft') {
         return ['Taslak', 'draft'];
     }
-    if (!empty($p['published_at']) && strtotime($p['published_at']) > time()) {
+    if (!post_is_live($p)) {
         return ['Zamanlanmış', 'scheduled'];
     }
     return ['Yayında', 'live'];
+}
+
+/** Public URL of a post; drafts and scheduled posts get ?preview=1 (they 404 for everyone else). */
+function admin_post_view_url(array $p): string
+{
+    return url('post/' . $p['slug'] . (post_is_live($p) ? '' : '?preview=1'));
 }
 
 /** Paginated admin list (includes drafts and scheduled). Returns [rows, total]. */
@@ -169,7 +235,7 @@ function admin_list_posts(int $page, string $status, string $q): array
     $total = (int)$count->fetchColumn();
 
     $per = ADMIN_PER_PAGE;
-    $offset = (max(1, $page) - 1) * $per;
+    $offset = (min(max(1, $page), 1000000) - 1) * $per;
     $stmt = db()->prepare(
         "SELECT * FROM posts WHERE $w ORDER BY COALESCE(published_at, created_at) DESC, id DESC LIMIT $per OFFSET $offset"
     );

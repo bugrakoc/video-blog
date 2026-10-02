@@ -4,21 +4,35 @@ declare(strict_types=1);
 require __DIR__ . '/app/bootstrap.php';
 
 header('Content-Type: text/html; charset=utf-8');
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: SAMEORIGIN');
+header('Referrer-Policy: strict-origin-when-cross-origin');   // YouTube embeds need the origin, so not no-referrer
 
 if (!is_file(APP_PATH . '/installed.lock') && is_file(__DIR__ . '/install.php')) {
-    redirect('/install.php');
+    // Only a site without an admin account is sent to the installer (a lost lock file alone doesn't count).
+    try {
+        $installed = admin_account_exists();
+    } catch (Throwable $ex) {
+        $installed = false;
+    }
+    if (!$installed) {
+        redirect(url('install.php'));
+    }
 }
 
 $path = (string)parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
 $path = trim(rawurldecode($path), '/');
 $segments = $path === '' ? [] : explode('/', $path);
 $perPage = (int)config('posts_per_page') ?: 12;
-$page = max(1, (int)($_GET['page'] ?? 1));
+// ?page=N must be 1..999999. Anything else becomes 0 and gets a 404 (huge numbers used to cause a database error).
+$rawPage = $_GET['page'] ?? '1';
+$page = $rawPage === '' ? 1 : (is_string($rawPage) && preg_match('/^[1-9][0-9]{0,5}$/', $rawPage) ? (int)$rawPage : 0);
 
 try {
     // /
     if (!$segments || $segments === ['index.php']) {
         [$posts, $total] = list_posts($page, $perPage);
+        check_page($page, $posts);
         render('list', [
             'posts' => $posts, 'total' => $total, 'page' => $page, 'perPage' => $perPage,
             'heading' => null, 'basePath' => '/',
@@ -31,13 +45,16 @@ try {
 
     // /post/{slug}
     if ($first === 'post' && count($segments) === 2) {
-        $preview = is_admin() && isset($_GET['preview']);
+        $preview = is_admin_preview();
         $post = get_post_by_slug($segments[1], $preview);
         if (!$post) {
             not_found();
         }
+        if ($preview) {
+            header('Cache-Control: private, no-store');
+        }
         render('post', [
-            'post' => $post, 'preview' => $preview && $post['status'] !== 'published',
+            'post' => $post, 'preview' => $preview && !post_is_live($post),
             'related' => related_posts((int)$post['id']),
             'meta' => post_meta($post),
         ]);
@@ -51,6 +68,7 @@ try {
             not_found();
         }
         [$posts, $total] = list_posts($page, $perPage, ['category_id' => (int)$cat['id']]);
+        check_page($page, $posts);
         render('list', [
             'posts' => $posts, 'total' => $total, 'page' => $page, 'perPage' => $perPage,
             'heading' => 'Kategori: ' . $cat['name'], 'basePath' => '/category/' . $cat['slug'],
@@ -65,12 +83,13 @@ try {
 
     // /search?q=
     if ($first === 'search' && count($segments) === 1) {
-        $q = trim((string)($_GET['q'] ?? ''));
+        $q = trim(is_string($_GET['q'] ?? null) ? $_GET['q'] : '');
         $posts = [];
         $total = 0;
         if ($q !== '') {
             [$posts, $total] = list_posts($page, $perPage, ['search' => mb_substr($q, 0, 100)]);
         }
+        check_page($page, $posts);
         render('list', [
             'posts' => $posts, 'total' => $total, 'page' => $page, 'perPage' => $perPage,
             'heading' => $q === '' ? 'Ara' : 'Arama: ' . $q, 'basePath' => '/search',
@@ -99,9 +118,12 @@ try {
 
     // /{slug}: static page
     if (count($segments) === 1) {
-        $preview = is_admin() && isset($_GET['preview']);
+        $preview = is_admin_preview();
         $pg = get_page_by_slug($first, $preview);
         if ($pg) {
+            if ($preview) {
+                header('Cache-Control: private, no-store');
+            }
             render('page', [
                 'pg' => $pg,
                 'meta' => [
@@ -125,6 +147,14 @@ try {
     }
 }
 
+/** 404 for a malformed ?page value or a page past the last one (instead of an empty "page 500"). */
+function check_page(int $page, array $posts): void
+{
+    if ($page === 0 || ($page > 1 && !$posts)) {
+        not_found();
+    }
+}
+
 /** SEO + JSON-LD (VideoObject) for a single post. */
 function post_meta(array $post): array
 {
@@ -140,7 +170,7 @@ function post_meta(array $post): array
         'type' => 'article',
         'published' => date('c', strtotime($published)),
         'video' => yt_embed_url($post['youtube_id']),
-        'robots' => $post['status'] === 'published' ? 'index,follow' : 'noindex,nofollow',
+        'robots' => post_is_live($post) ? 'index,follow' : 'noindex,nofollow',
         'jsonld' => [
             '@context' => 'https://schema.org',
             '@type' => 'VideoObject',

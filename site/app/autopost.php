@@ -8,16 +8,7 @@ declare(strict_types=1);
 
 const AUTOPOST_LOCK = 'videoblog_autopost';
 
-/** Table of every video the autoposter has already handled, so deleted posts don't come back. */
-function autopost_ensure_schema(): void
-{
-    db()->exec(
-        'CREATE TABLE IF NOT EXISTS autopost_seen (
-            youtube_id VARCHAR(20) NOT NULL PRIMARY KEY,
-            seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
-    );
-}
+// autopost_ensure_schema() and mark_video_seen() live in queries.php, because the admin panel also needs them.
 
 function autopost_feed_url(string $channelId): string
 {
@@ -138,21 +129,44 @@ function autopost_parse_feed(string $xml): array
 
 /**
  * Turn a plain-text YouTube description into safe Markdown for the body field.
- * Keeps line breaks and links; stops "#hashtag" lines from becoming headings.
+ * Keeps line breaks and links; every line stays plain text (see description_line_to_markdown()).
  */
 function description_to_markdown(string $text): string
 {
     $text = str_replace(["\r\n", "\r", "\0"], ["\n", "\n", ''], $text);
-    $lines = [];
-    foreach (explode("\n", $text) as $line) {
-        $line = rtrim($line);
-        if ($line !== '' && $line[0] === '#') {
-            $line = '\\' . $line;
-        }
-        $lines[] = $line;
-    }
+    $lines = array_map('description_line_to_markdown', explode("\n", $text));
     $text = trim(implode("\n", $lines));
     return preg_replace("/\n{3,}/", "\n\n", $text);
+}
+
+/**
+ * One description line as literal text, so Parsedown doesn't turn it into a heading ("#tag", or the line above
+ * "-----" / "====="), list ("- ", "1986. "), quote, rule, code block (indentation, ```), table or link reference.
+ * Characters Parsedown can backslash-escape get a backslash (readable in the editor); '=', '~' and ':' can't be
+ * escaped that way, so those rare lines start with an HTML entity instead.
+ */
+function description_line_to_markdown(string $line): string
+{
+    $line = ltrim(rtrim($line), " \t");          // indentation would make a code block; HTML collapses it anyway
+    if ($line === '') {
+        return '';
+    }
+    if (preg_match('/^=+$/', $line)) {
+        return '&#61;' . substr($line, 1);         // setext heading underline
+    }
+    if (str_starts_with($line, '~~~')) {
+        return '&#126;' . substr($line, 1);        // fenced code
+    }
+    if (preg_match('/^:[-:| ]*-[-:| ]*$/', $line)) {
+        return '&#58;' . substr($line, 1);         // table alignment row
+    }
+    if (preg_match('/^\d+\./', $line)) {
+        return (string)preg_replace('/^(\d+)\./', '$1\\.', $line);   // ordered list
+    }
+    if (strpos('#>*+-_`|[', $line[0]) !== false) {
+        return '\\' . $line;                       // heading, quote, list, rule, code fence, table, reference
+    }
+    return $line;
 }
 
 function autopost_record(bool $ok, string $message): void

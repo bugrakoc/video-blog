@@ -33,7 +33,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', 'API anahtarı geçersiz görünüyor (harf, rakam, “-” ve “_” içermeli).');
             redirect(url('admin/import.php'));
         }
-        $_SESSION['import'] = import_new_state($key, $playlist, (string)($_POST['mode'] ?? 'draft'));
+        $_SESSION['import'] = import_new_state($key, $playlist, (string)($_POST['mode'] ?? 'draft'), !empty($_POST['include_unlisted']));
         $action = 'continue';
     }
 
@@ -57,6 +57,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                  . $state['existing'] . ' video zaten sitedeydi';
             if ($state['unavailable'] > 0) {
                 $msg .= ', ' . $state['unavailable'] . ' özel/silinmiş video atlandı';
+            }
+            if (($state['skipped_unlisted'] ?? 0) > 0) {
+                $msg .= ', ' . $state['skipped_unlisted'] . ' liste dışı video eklenmedi';
             }
             $msg .= '.';
             $draft = $state['mode'] !== 'publish';
@@ -95,10 +98,11 @@ admin_header('Eski videoları içe aktar', 'settings');
       <strong><?= (int)$st['imported'] ?></strong> video eklendi ·
       <?= (int)$st['existing'] ?> zaten vardı ·
       <?= (int)$st['unavailable'] ?> özel/silinmiş atlandı
+      <?= !empty($st['skipped_unlisted']) ? ' · ' . (int)$st['skipped_unlisted'] . ' liste dışı atlandı' : '' ?>
       <?= $st['total'] ? ' · kanalda toplam ' . (int)$st['total'] . ' video' : '' ?>
     </p>
     <?php if ($st['total'] > 0): ?>
-      <progress max="<?= (int)$st['total'] ?>" value="<?= (int)min($st['total'], $st['imported'] + $st['existing'] + $st['unavailable']) ?>" style="width:100%"></progress>
+      <progress max="<?= (int)$st['total'] ?>" value="<?= (int)min($st['total'], $st['imported'] + $st['existing'] + $st['unavailable'] + ($st['skipped_unlisted'] ?? 0)) ?>" style="width:100%"></progress>
     <?php endif; ?>
     <div class="row-actions">
       <form method="post"<?= $st['error'] ? '' : ' data-autosubmit="800"' ?> class="inline">
@@ -193,8 +197,10 @@ admin_header('Eski videoları içe aktar', 'settings');
                 <option value="publish">Hepsini doğrudan yayınla</option>
               </select>
             </label>
+            <label class="check"><input type="checkbox" name="include_unlisted" value="1"> Liste dışı videoları da ekle</label>
+            <p class="hint" style="margin-top:-2px">Liste dışı videolar YouTube’da aramada çıkmaz, yalnızca bağlantıyla açılır. İşaretlerseniz sitenizde herkese açık yazı olurlar.</p>
             <button class="btn primary">İçe aktarmayı başlat</button>
-            <p class="hint">Sitede zaten olan videolar atlanır, özel ve silinmiş videolar eklenmez. Daha önce sildiğiniz bir video kanalda hâlâ duruyorsa geri gelir; bu yüzden bu işlemi bir kez çalıştırın.</p>
+            <p class="hint">Sitede zaten olan videolar atlanır, özel ve silinmiş videolar eklenmez, liste dışı videolar yalnızca kutuyu işaretlerseniz eklenir. Daha önce sildiğiniz bir video kanalda hâlâ duruyorsa geri gelir; bu yüzden bu işlemi bir kez çalıştırın.</p>
           </fieldset>
         </form>
       <?php endif; ?>

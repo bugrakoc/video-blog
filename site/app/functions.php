@@ -20,7 +20,9 @@ function url(string $path = ''): string
 
 function json_out($data): string
 {
-    return json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP);
+    // Invalid UTF-8 is replaced instead of making json_encode() fail (which used to crash the page).
+    $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_INVALID_UTF8_SUBSTITUTE);
+    return $json === false ? 'null' : $json;
 }
 
 function redirect(string $to, int $code = 302): never
@@ -104,14 +106,14 @@ function is_reserved_slug(string $slug): bool
 /** Accent-folded text stored next to each post for searching. */
 function search_text(string $title, string $body): string
 {
-    $plain = strip_tags(markdown_html($body));
+    $plain = html_entity_decode(strip_tags(markdown_html($body)), ENT_QUOTES | ENT_HTML5, 'UTF-8');
     return fold($title . ' ' . $plain);
 }
 
 /** Truncate on a word boundary without splitting multibyte characters. */
 function truncate(string $s, int $len = 220): string
 {
-    $s = trim(preg_replace('/\s+/u', ' ', $s));
+    $s = trim((string)preg_replace('/\s+/u', ' ', mb_scrub($s, 'UTF-8')));
     if (mb_strlen($s) <= $len) {
         return $s;
     }
@@ -120,7 +122,8 @@ function truncate(string $s, int $len = 220): string
     if ($sp !== false && $sp > $len * 0.6) {
         $cut = mb_substr($cut, 0, $sp);
     }
-    return rtrim($cut, " ,.;:-–—") . '…';
+    // Character-aware trim: rtrim() works on bytes and used to cut emojis (and À, Ó, Ô...) in half.
+    return (string)preg_replace('/[\s,.;:\-–—]+$/u', '', $cut) . '…';
 }
 
 /* ---------- Markdown ---------- */
@@ -246,13 +249,21 @@ function set_setting(string $key, string $value): void
 
 /* ---------- Sessions, CSRF, auth ---------- */
 
+const SESSION_NAME = 'vbsid';
+const ADMIN_IDLE_SECONDS = 7200;   // admin auto-logout after 2 hours of inactivity
+
 function start_session(): void
 {
     if (session_status() === PHP_SESSION_ACTIVE) {
         return;
     }
     $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
-    session_name('vbsid');
+    // PHP's default garbage collection deletes session files after 24 idle minutes, which logged the admin out
+    // long before the 2-hour idle limit. Keep them at least that long (the idle limit itself is enforced in admin_boot()).
+    if ((int)ini_get('session.gc_maxlifetime') < ADMIN_IDLE_SECONDS) {
+        ini_set('session.gc_maxlifetime', (string)ADMIN_IDLE_SECONDS);
+    }
+    session_name(SESSION_NAME);
     session_set_cookie_params([
         'lifetime' => 0,
         'path' => '/',
@@ -277,14 +288,34 @@ function csrf_field(): string
     return '<input type="hidden" name="_csrf" value="' . e(csrf_token()) . '">';
 }
 
-function csrf_check(): void
+function csrf_valid(): bool
 {
     start_session();
-    $sent = (string)($_POST['_csrf'] ?? '');
-    if ($sent === '' || !hash_equals((string)($_SESSION['csrf'] ?? ''), $sent)) {
-        http_response_code(400);
-        exit('Geçersiz istek (CSRF).');
+    $sent = $_POST['_csrf'] ?? '';
+    return is_string($sent) && $sent !== '' && hash_equals((string)($_SESSION['csrf'] ?? ''), $sent);
+}
+
+/** Stop a form submission whose CSRF token is missing or stale, with a page that says what to do next. */
+function csrf_check(): void
+{
+    if (csrf_valid()) {
+        return;
     }
+    http_response_code(400);
+    header('Content-Type: text/html; charset=utf-8');
+    header('Cache-Control: no-store');
+    $loggedIn = !empty($_SESSION['admin_id']);
+    echo '<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+       . '<meta name="robots" content="noindex"><title>İstek doğrulanamadı</title></head>'
+       . '<body style="font:16px/1.6 system-ui,sans-serif;max-width:560px;margin:40px auto;padding:0 16px">'
+       . '<h1 style="font-size:1.3em">İstek doğrulanamadı</h1>'
+       . '<p>Form gönderilemedi, çünkü güvenlik doğrulaması geçersiz. Genellikle oturumun süresi dolduğunda ya da sayfa çok uzun süre açık kaldığında olur.</p>'
+       . '<p>Tarayıcının <strong>geri</strong> düğmesiyle forma dönün: yazdıklarınız çoğunlukla yerinde durur. Metni kopyalayıp sayfayı yenileyin'
+       . ($loggedIn ? '' : ' (gerekirse tekrar giriş yapın)') . ' ve yeniden gönderin.</p>'
+       . '<p><a href="javascript:history.back()">← Geri dön</a>'
+       . ($loggedIn ? '' : ' · <a href="' . e(url('admin/login.php')) . '">Giriş yap</a>') . '</p>'
+       . '</body></html>';
+    exit;
 }
 
 function is_admin(): bool
@@ -293,10 +324,35 @@ function is_admin(): bool
     return !empty($_SESSION['admin_id']);
 }
 
+/**
+ * Admin preview check for public pages (?preview=1). Ordinary visitors never get a session (no cookie, no
+ * session file): one is only opened when the preview flag is present and the browser already has a session cookie.
+ */
+function is_admin_preview(): bool
+{
+    return isset($_GET['preview']) && isset($_COOKIE[SESSION_NAME]) && is_admin();
+}
+
 function require_admin(): void
 {
     if (!is_admin()) {
         redirect(url('admin/login.php'));
+    }
+}
+
+/**
+ * True when the admins table exists and holds at least one account (the site is installed).
+ * A missing table means "not installed yet"; any other database error is passed on.
+ */
+function admin_account_exists(): bool
+{
+    try {
+        return (int)db()->query('SELECT COUNT(*) FROM admins')->fetchColumn() > 0;
+    } catch (PDOException $e) {
+        if (($e->errorInfo[0] ?? '') === '42S02' || (int)($e->errorInfo[1] ?? 0) === 1146) {
+            return false;
+        }
+        throw $e;
     }
 }
 
