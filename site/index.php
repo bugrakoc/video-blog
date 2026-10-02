@@ -6,7 +6,15 @@ require __DIR__ . '/app/bootstrap.php';
 header('Content-Type: text/html; charset=utf-8');
 
 if (!is_file(APP_PATH . '/installed.lock') && is_file(__DIR__ . '/install.php')) {
-    redirect('/install.php');
+    // Only a site without an admin account is sent to the installer (a lost lock file alone doesn't count).
+    try {
+        $installed = admin_account_exists();
+    } catch (Throwable $ex) {
+        $installed = false;
+    }
+    if (!$installed) {
+        redirect(url('install.php'));
+    }
 }
 
 $path = (string)parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);

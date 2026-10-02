@@ -303,6 +303,22 @@ function require_admin(): void
     }
 }
 
+/**
+ * True when the admins table exists and holds at least one account (the site is installed).
+ * A missing table means "not installed yet"; any other database error is passed on.
+ */
+function admin_account_exists(): bool
+{
+    try {
+        return (int)db()->query('SELECT COUNT(*) FROM admins')->fetchColumn() > 0;
+    } catch (PDOException $e) {
+        if (($e->errorInfo[0] ?? '') === '42S02' || (int)($e->errorInfo[1] ?? 0) === 1146) {
+            return false;
+        }
+        throw $e;
+    }
+}
+
 function client_ip(): string
 {
     return substr((string)($_SERVER['REMOTE_ADDR'] ?? '0.0.0.0'), 0, 45);

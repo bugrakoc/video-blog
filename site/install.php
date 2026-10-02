@@ -11,8 +11,25 @@ $log = [];
 $errors = [];
 $done = false;
 
+function install_stop(string $html): never
+{
+    exit('<!doctype html><meta charset="utf-8"><p style="font-family:sans-serif">' . $html . '</p>');
+}
+
 if (is_file($lock)) {
-    exit('<p style="font-family:sans-serif">Zaten kurulmuş. Güvenlik için <code>install.php</code> dosyasını silin.</p>');
+    install_stop('Zaten kurulmuş. Güvenlik için <code>install.php</code> dosyasını silin.');
+}
+
+// The database is the real proof of installation: if an admin account exists, this page must never create
+// another one, even when installed.lock is gone (e.g. after re-uploading app/). Re-create the lock and stop.
+try {
+    $alreadyInstalled = admin_account_exists();
+} catch (Throwable $ex) {
+    $alreadyInstalled = false;      // no database connection yet; the form reports the error on submit
+}
+if ($alreadyInstalled) {
+    @file_put_contents($lock, date('c'));
+    install_stop('Bu site zaten kurulmuş (veritabanında yönetici hesabı var). Güvenlik için <code>install.php</code> dosyasını silin.');
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -32,6 +49,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$errors) {
         try {
             $pdo = db();
+            if (admin_account_exists()) {
+                throw new RuntimeException('Bu site zaten kurulmuş. install.php dosyasını silin.');
+            }
             // 1. Schema
             $sql = file_get_contents(APP_PATH . '/schema.sql');
             $sql = preg_replace('/^\s*--.*$/m', '', $sql);   // drop comment lines
@@ -91,10 +111,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $log[] = 'Örnek içerik eklendi.';
             }
 
-            file_put_contents($lock, date('c'));
+            if (@file_put_contents($lock, date('c')) === false) {
+                $log[] = 'Uyarı: app/installed.lock yazılamadı. Kurulum yine de tekrar çalıştırılamaz (yönetici hesabı var), ama install.php dosyasını mutlaka silin.';
+            }
             $done = true;
         } catch (Throwable $ex) {
-            $errors[] = 'Hata: ' . $ex->getMessage();
+            error_log('install: ' . $ex->getMessage());
+            if ($ex instanceof PDOException && !config('debug')) {
+                // Raw database errors can reveal account details to whoever opens this page.
+                $errors[] = 'Veritabanı hatası. app/config.php içindeki veritabanı bilgilerini kontrol edin. '
+                          . '(Ayrıntı sunucunun hata günlüğünde; sayfada görmek için config.php içinde debug değerini true yapın.)';
+            } else {
+                $errors[] = 'Hata: ' . $ex->getMessage();
+            }
         }
     }
 }
