@@ -34,10 +34,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (!$errors) {
-        db()->prepare('UPDATE admins SET password_hash = ? WHERE id = ?')
-            ->execute([password_hash($new, PASSWORD_DEFAULT), (int)$_SESSION['admin_id']]);
-        session_regenerate_id(true);
-        flash('ok', 'Şifre değiştirildi.');
+        $newHash = password_hash($new, PASSWORD_DEFAULT);
+        db()->prepare('UPDATE admins SET password_hash = ? WHERE id = ?')->execute([$newHash, (int)$_SESSION['admin_id']]);
+        // Keep this session; every other session no longer matches the password and is logged out on its next request.
+        admin_session_login((int)$_SESSION['admin_id'], $newHash);
+        flash('ok', 'Şifre değiştirildi. Diğer cihazlardaki oturumlar kapatıldı.');
         redirect(url('admin/settings.php'));
     }
 }

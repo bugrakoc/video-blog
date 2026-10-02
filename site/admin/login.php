@@ -29,13 +29,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($ok) {
             login_clear_failures($ip);
-            if (password_needs_rehash($row['password_hash'], PASSWORD_DEFAULT)) {
-                db()->prepare('UPDATE admins SET password_hash = ? WHERE id = ?')
-                    ->execute([password_hash($pass, PASSWORD_DEFAULT), $row['id']]);
+            $hash = $row['password_hash'];
+            if (password_needs_rehash($hash, PASSWORD_DEFAULT)) {
+                $hash = password_hash($pass, PASSWORD_DEFAULT);
+                db()->prepare('UPDATE admins SET password_hash = ? WHERE id = ?')->execute([$hash, $row['id']]);
             }
-            session_regenerate_id(true);
-            $_SESSION['admin_id'] = (int)$row['id'];
-            $_SESSION['last_seen'] = time();
+            admin_session_login((int)$row['id'], $hash);
             redirect(url('admin/index.php'));
         }
         $error = 'Kullanıcı adı veya şifre hatalı.';

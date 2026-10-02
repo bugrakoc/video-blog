@@ -21,11 +21,16 @@ function admin_boot(bool $requireLogin = true): void
     start_session();
     if (!empty($_SESSION['admin_id'])) {
         $now = time();
-        if ($now - (int)($_SESSION['last_seen'] ?? $now) > ADMIN_IDLE_SECONDS) {
+        $expired = $now - (int)($_SESSION['last_seen'] ?? $now) > ADMIN_IDLE_SECONDS;
+        $revoked = !$expired && !admin_session_matches_password();
+        if ($expired || $revoked) {
             session_unset();
             session_destroy();
             start_session();
-            flash('error', 'Oturum süresi doldu. Lütfen tekrar giriş yapın.');
+            session_regenerate_id(true);
+            flash('error', $expired
+                ? 'Oturum süresi doldu. Lütfen tekrar giriş yapın.'
+                : 'Şifre değiştirildiği için oturum kapatıldı. Lütfen tekrar giriş yapın.');
         } else {
             $_SESSION['last_seen'] = $now;
         }
@@ -33,6 +38,34 @@ function admin_boot(bool $requireLogin = true): void
     if ($requireLogin) {
         require_admin();
     }
+}
+
+/* ---------- Session ↔ password binding ---------- */
+
+/** Value stored in the session at login. Changing the password changes it, which ends every other session. */
+function admin_password_fingerprint(string $passwordHash): string
+{
+    return hash('sha256', 'vb-session|' . $passwordHash);
+}
+
+/** Mark the current session as logged in as $adminId (whose current hash is $passwordHash). */
+function admin_session_login(int $adminId, string $passwordHash): void
+{
+    session_regenerate_id(true);
+    unset($_SESSION['csrf']);                     // fresh CSRF token for the logged-in session
+    $_SESSION['admin_id'] = $adminId;
+    $_SESSION['admin_pw'] = admin_password_fingerprint($passwordHash);
+    $_SESSION['last_seen'] = time();
+}
+
+/** False when the account is gone or its password changed after this session logged in. */
+function admin_session_matches_password(): bool
+{
+    $stmt = db()->prepare('SELECT password_hash FROM admins WHERE id = ?');
+    $stmt->execute([(int)$_SESSION['admin_id']]);
+    $hash = $stmt->fetchColumn();
+    return is_string($hash)
+        && hash_equals(admin_password_fingerprint($hash), (string)($_SESSION['admin_pw'] ?? ''));
 }
 
 /* ---------- Flash messages ---------- */
