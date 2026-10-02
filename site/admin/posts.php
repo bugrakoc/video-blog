@@ -30,7 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $status = in_array($_GET['status'] ?? '', ['published', 'draft', 'scheduled'], true) ? $_GET['status'] : '';
-$q = trim((string)($_GET['q'] ?? ''));
+$q = trim(is_string($_GET['q'] ?? null) ? $_GET['q'] : '');
 $page = min(max(1, (int)($_GET['page'] ?? 1)), 1000000);
 [$posts, $total] = admin_list_posts($page, $status, $q);
 

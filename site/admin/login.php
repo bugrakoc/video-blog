@@ -51,7 +51,7 @@ admin_header('Giriş');
   <form method="post" autocomplete="on">
     <?= csrf_field() ?>
     <label>Kullanıcı adı
-      <input type="text" name="username" required autofocus autocomplete="username" value="<?= e((string)($_POST['username'] ?? '')) ?>">
+      <input type="text" name="username" required autofocus autocomplete="username" value="<?= e($user ?? '') ?>">
     </label>
     <label>Şifre
       <input type="password" name="password" required autocomplete="current-password">

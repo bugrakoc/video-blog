@@ -4,6 +4,9 @@ declare(strict_types=1);
 require __DIR__ . '/app/bootstrap.php';
 
 header('Content-Type: text/html; charset=utf-8');
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: SAMEORIGIN');
+header('Referrer-Policy: strict-origin-when-cross-origin');   // YouTube embeds need the origin, so not no-referrer
 
 if (!is_file(APP_PATH . '/installed.lock') && is_file(__DIR__ . '/install.php')) {
     // Only a site without an admin account is sent to the installer (a lost lock file alone doesn't count).
@@ -80,7 +83,7 @@ try {
 
     // /search?q=
     if ($first === 'search' && count($segments) === 1) {
-        $q = trim((string)($_GET['q'] ?? ''));
+        $q = trim(is_string($_GET['q'] ?? null) ? $_GET['q'] : '');
         $posts = [];
         $total = 0;
         if ($q !== '') {

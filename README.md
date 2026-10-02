@@ -128,7 +128,9 @@ Turkish content is the main reason for several design choices. Keep these when c
 
 ## Security notes
 
-- Passwords are hashed with `password_hash`. Login is limited to 5 failed attempts per IP per 15 minutes, sessions end after 2 hours of inactivity, and every form (including logout and delete) needs a CSRF token. All SQL uses prepared statements, and all output goes through `e()`.
+- Passwords are hashed with `password_hash`. Login is limited to 5 failed attempts per IP per 15 minutes (each attempt is recorded before the password is checked, so parallel requests can't get around the limit), and an unknown username takes as long to reject as a wrong password. Sessions end after 2 hours of inactivity, and changing the password logs out every other session. Every form (including logout and delete) needs a CSRF token. All SQL uses prepared statements, and all output goes through `e()`.
+- `install.php` refuses to run once an admin account exists, even if `app/installed.lock` is lost (for example after re-uploading `app/`). Still delete `install.php` after installing.
+- Public pages never start a session (no cookie for visitors); only `?preview=1` links opened by a logged-in admin do.
 - Markdown is rendered with Parsedown in safe mode, so raw HTML in post bodies is escaped.
 - `app/` and `cron/` are denied by `.htaccess`. If DirectAdmin allows it, moving `app/` above `public_html` is even safer (update the `require` paths in `index.php` and `install.php`).
 - Never commit real credentials. Keep `app/config.php` in the repo as placeholders only.
