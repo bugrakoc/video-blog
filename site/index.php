@@ -39,10 +39,13 @@ try {
 
     // /post/{slug}
     if ($first === 'post' && count($segments) === 2) {
-        $preview = is_admin() && isset($_GET['preview']);
+        $preview = is_admin_preview();
         $post = get_post_by_slug($segments[1], $preview);
         if (!$post) {
             not_found();
+        }
+        if ($preview) {
+            header('Cache-Control: private, no-store');
         }
         render('post', [
             'post' => $post, 'preview' => $preview && $post['status'] !== 'published',
@@ -107,9 +110,12 @@ try {
 
     // /{slug}: static page
     if (count($segments) === 1) {
-        $preview = is_admin() && isset($_GET['preview']);
+        $preview = is_admin_preview();
         $pg = get_page_by_slug($first, $preview);
         if ($pg) {
+            if ($preview) {
+                header('Cache-Control: private, no-store');
+            }
             render('page', [
                 'pg' => $pg,
                 'meta' => [

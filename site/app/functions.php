@@ -249,13 +249,15 @@ function set_setting(string $key, string $value): void
 
 /* ---------- Sessions, CSRF, auth ---------- */
 
+const SESSION_NAME = 'vbsid';
+
 function start_session(): void
 {
     if (session_status() === PHP_SESSION_ACTIVE) {
         return;
     }
     $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
-    session_name('vbsid');
+    session_name(SESSION_NAME);
     session_set_cookie_params([
         'lifetime' => 0,
         'path' => '/',
@@ -294,6 +296,15 @@ function is_admin(): bool
 {
     start_session();
     return !empty($_SESSION['admin_id']);
+}
+
+/**
+ * Admin preview check for public pages (?preview=1). Ordinary visitors never get a session (no cookie, no
+ * session file): one is only opened when the preview flag is present and the browser already has a session cookie.
+ */
+function is_admin_preview(): bool
+{
+    return isset($_GET['preview']) && isset($_COOKIE[SESSION_NAME]) && is_admin();
 }
 
 function require_admin(): void
