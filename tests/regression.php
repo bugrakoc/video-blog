@@ -94,6 +94,24 @@ foreach ([json_encode([$public, $other]), json_encode(['entries' => [$public, $o
 $file = tempnam(sys_get_temp_dir(), 'video-blog-');
 try {
     $uploads = [['name' => 'export.jsonl', 'path' => $file]];
+    $match = ['channel_id' => $channel] + $public;
+    $wrong = ['channel_id' => 'UC' . str_repeat('y', 22)] + $other;
+    $noChannel = ['id' => 'NoChannel01'] + $public;
+    file_put_contents($file, json_encode([$noChannel, $wrong, $match]));
+    $result = import_file_analyze($uploads, $channel);
+    expect_same([$id], array_column($result['videos'], 'id'), 'Only the configured channel is staged');
+    expect_same(1, $result['report']['skipped']['missing_channel'], 'Missing channel reported');
+    expect_same(1, $result['report']['skipped']['other_channel'], 'Different channel reported');
+    file_put_contents($file, json_encode($noChannel));
+    expect_same([$noChannel['id']], array_column(import_file_analyze($uploads, '')['videos'], 'id'), 'Channel is optional on an unconfigured site');
+    try {
+        import_file_analyze($uploads, $channel);
+        throw new LogicException('An unattributed export was accepted for a configured channel');
+    } catch (RuntimeException $error) {
+        expect_same(true, str_contains($error->getMessage(), 'kanal kimliği eksik'), 'Empty preview explains the missing channel');
+    }
+    expect_same(false, import_file_channel_error(['channel' => $channel], $channel) === null, 'Old configured-channel queue needs revalidation');
+    expect_same(null, import_file_channel_error(['channel' => ''], ''), 'Old unfiltered queue can resume');
     foreach ([$entry, ['availability' => 'private'] + $entry] as $restricted) {
         file_put_contents($file, json_encode([$public, $other, $restricted]));
         $result = import_file_analyze($uploads, '');

@@ -10,10 +10,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     admin_content_lock('admin/posts.php');
     $id = form_id($_POST, 'id');
-    $post = $id ? get_post($id) : null;
+    $post = admin_post_rows('id = ?', [$id])[0] ?? null;
     $action = form_text($_POST, 'action');
     if (!$post) {
         flash('error', 'Video bulunamadı.');
+    } elseif (form_text($_POST, 'version') !== editor_version($post)) {
+        flash('error', 'Video değişmiş veya liste güncel değil. İşlem uygulanmadı. Güncel videoyu inceleyip tekrar deneyin.');
     } elseif ($action === 'delete') {
         autopost_ensure_schema();
         ensure_video_id_collations();
@@ -70,7 +72,7 @@ admin_header('Videolar', 'posts');
   <p class="empty">Kayıt bulunamadı.</p>
 <?php else: ?>
   <table class="list">
-    <?php foreach ($posts as $p): [$label, $cls] = post_state($p); ?>
+    <?php foreach ($posts as $p): [$label, $cls] = post_state($p); $version = editor_version($p); ?>
       <tr>
         <td class="thumb"><img src="<?= e(yt_thumb($p['youtube_id'])) ?>" alt="" loading="lazy"></td>
         <td>
@@ -87,6 +89,7 @@ admin_header('Videolar', 'posts');
           <a href="<?= e(admin_post_view_url($p)) ?>" target="_blank" rel="noopener"><?= post_is_live($p) ? 'Gör' : 'Önizle' ?> ↗</a>
           <form method="post" class="inline">
             <?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$p['id'] ?>">
+            <input type="hidden" name="version" value="<?= e($version) ?>">
             <?php if ($p['status'] === 'draft'): ?>
               <button class="link" name="action" value="publish"><?= $p['published_at'] && strtotime($p['published_at']) > time() ? 'Zamanla' : 'Yayınla' ?></button>
             <?php else: ?>
@@ -95,6 +98,7 @@ admin_header('Videolar', 'posts');
           </form>
           <form method="post" class="inline" data-confirm="“<?= e($p['title']) ?>” kalıcı olarak silinsin mi?">
             <?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$p['id'] ?>">
+            <input type="hidden" name="version" value="<?= e($version) ?>">
             <button class="link danger" name="action" value="delete">Sil</button>
           </form>
         </td>

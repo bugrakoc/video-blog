@@ -42,8 +42,13 @@ function collect_uploads(): array
     if (!$out) {
         throw new RuntimeException('Dosya seçilmedi.');
     }
-    if (count($out) > 20) {
-        throw new RuntimeException('Bir seferde en fazla 20 dosya yüklenebilir.');
+    $expected = form_id($_POST, 'file_count');
+    $limit = upload_file_count_limit();
+    if ($expected > $limit || count($out) > $limit) {
+        throw new RuntimeException("Bir seferde en fazla $limit dosya yüklenebilir. Bu yükleme işleme alınmadı.");
+    }
+    if ($expected !== count($out)) {
+        throw new RuntimeException('Seçilen dosya sayısı sunucuya ulaşan dosyalarla eşleşmiyor. Sayfayı yenileyip dosyaları tekrar seçin.');
     }
     return $out;
 }
@@ -98,7 +103,8 @@ function handle_import_file_action(string $action, ?array $job, string $channel,
             return 'admin/import-file.php';
         }
         import_queue_replace($result['videos'], [
-            'id' => bin2hex(random_bytes(16)), 'channel' => $channel, 'report' => $result['report'], 'run' => null,
+            'id' => bin2hex(random_bytes(16)), 'channel' => $channel, 'channel_verified' => $channel !== '',
+            'report' => $result['report'], 'run' => null,
         ]);
         return 'admin/import-file.php';
     }
@@ -112,9 +118,10 @@ function handle_import_file_action(string $action, ?array $job, string $channel,
         flash('ok', 'İçe aktarma iptal edildi. Şimdiye kadar eklenen videolar sitede duruyor.');
         return 'admin/import.php';
     }
-    if ($job['channel'] !== $channel) {
-        flash('error', 'Kanal ayarlarda değişti. Bu içe aktarmayı iptal edip dosyayı yeniden yükleyin.');
-        return 'admin/import.php';
+    $channelError = import_file_channel_error($job, $channel);
+    if ($channelError !== null) {
+        flash('error', $channelError);
+        return 'admin/import-file.php';
     }
 
     if ($action === 'start' && $job['run'] === null) {
@@ -176,6 +183,7 @@ if ($job === null) {
 $stats = import_queue_stats();
 $run = $job['run'];
 $report = $job['report'];
+$channelError = import_file_channel_error($job, $channel);
 
 admin_header('Dosyadan içe aktar', 'settings');
 ?>
@@ -184,8 +192,8 @@ admin_header('Dosyadan içe aktar', 'settings');
   <a class="btn" href="import.php">← İçe aktarma yöntemleri</a>
 </div>
 
-<?php if ($job['channel'] !== $channel): ?>
-  <div class="flash error">Kanal ayarlarda değişti. Bu içe aktarmayı iptal edip dosyayı yeniden yükleyin.</div>
+<?php if ($channelError !== null): ?>
+  <div class="flash error"><?= e($channelError) ?></div>
   <form method="post">
     <?= csrf_field() ?><input type="hidden" name="job" value="<?= e($job['id']) ?>">
     <button class="btn" name="action" value="cancel">İptal</button>
@@ -237,6 +245,7 @@ admin_header('Dosyadan içe aktar', 'settings');
       <?php if ($report && $report['skipped']['live'] > 0): ?> <?= (int)$report['skipped']['live'] ?> canlı/planlanmış yayın atlandı.<?php endif; ?>
       <?php if ($report && $report['skipped']['state'] > 0): ?> <?= (int)$report['skipped']['state'] ?> işlenmemiş/başarısız video atlandı.<?php endif; ?>
       <?php if ($report && $report['skipped']['other_channel'] > 0): ?> <?= (int)$report['skipped']['other_channel'] ?> video başka bir kanala ait olduğu için atlandı.<?php endif; ?>
+      <?php if (!empty($report['skipped']['missing_channel'])): ?> <?= (int)$report['skipped']['missing_channel'] ?> video kanal kimliği eksik olduğu için atlandı.<?php endif; ?>
       <?php if ($report && $report['duplicates'] > 0): ?> <?= (int)$report['duplicates'] ?> tekrar eden kayıt birleştirildi.<?php endif; ?>
     </p>
 

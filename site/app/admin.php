@@ -239,6 +239,18 @@ function admin_post_view_url(array $p): string
     return url('post/' . $p['slug'] . (post_is_live($p) ? '' : '?preview=1'));
 }
 
+/** Use the same row for list actions and their revision check, without loading full post bodies into PHP. */
+function admin_post_rows(string $condition, array $params): array
+{
+    $stmt = db()->prepare(
+        "SELECT id, title, slug, youtube_id, status, published_at, created_at, updated_at, source, meta_description,
+                SHA2(body, 256) AS body_hash, SHA2(excerpt, 256) AS excerpt_hash
+         FROM posts WHERE $condition"
+    );
+    $stmt->execute($params);
+    return attach_categories($stmt->fetchAll());
+}
+
 /** Paginated admin list (includes drafts and scheduled). Returns [rows, total]. */
 function admin_list_posts(int $page, string $status, string $q): array
 {
@@ -262,12 +274,8 @@ function admin_list_posts(int $page, string $status, string $q): array
 
     $per = ADMIN_PER_PAGE;
     $offset = (min(max(1, $page), 1000000) - 1) * $per;
-    $stmt = db()->prepare(
-        "SELECT id, title, slug, youtube_id, status, published_at, created_at, source FROM posts
-         WHERE $w ORDER BY COALESCE(published_at, created_at) DESC, id DESC LIMIT $per OFFSET $offset"
-    );
-    $stmt->execute($params);
-    return [attach_categories($stmt->fetchAll()), $total];
+    $rows = admin_post_rows("$w ORDER BY COALESCE(published_at, created_at) DESC, id DESC LIMIT $per OFFSET $offset", $params);
+    return [$rows, $total];
 }
 
 /** Convert a <input type=datetime-local> value to a DB datetime, or null. */

@@ -92,6 +92,7 @@ $fileJob = import_file_job($channel);
 $staged = $fileJob ? import_queue_stats()['total'] : 0;       // videos from an uploaded file waiting for confirmation
 $limit = upload_limit_bytes();
 $limitText = $limit ? 'En fazla ' . round($limit / 1048576, 1) . ' MB.' : '';
+$fileCountLimit = upload_file_count_limit();
 $ytdlpCmd = $playlist
     ? 'yt-dlp --skip-download --ignore-no-formats-error --no-warnings --print-to-file "%(.{id,title,description,upload_date,timestamp,channel_id,availability,live_status})j" videolar.jsonl "https://www.youtube.com/playlist?list=' . $playlist . '"'
     : '';
@@ -147,10 +148,13 @@ admin_header('Eski videoları içe aktar', 'settings');
         <li>Sayfanın en altında <em>Sonraki adım</em>’a basın. Dışa aktarma türü <em>Bir kez dışa aktar</em>, dosya türü <em>.zip</em> olsun, ardından <em>Dışa aktarma oluştur</em>’a basın.</li>
         <li>Hazır olduğunda Google e-posta ile bir indirme bağlantısı yollar (genellikle birkaç dakika, nadiren birkaç saat sürer). Zip’i indirin ve <strong>açmadan</strong> aşağıdan yükleyin. Birden fazla parça (<code>…-001.zip</code>, <code>…-002.zip</code>) gelirse hepsini birlikte seçin.</li>
       </ol>
-      <p class="hint">Özel (private) videolar eklenmez; liste dışı videoları eklemek isteyip istemediğinizi bir sonraki ekranda seçersiniz. Kanal bir marka hesabına bağlıysa, dosyadaki kanal kimliği Ayarlar’dakiyle eşleşmediğinde site sizi uyarır.</p>
+      <p class="hint">Özel videolar atlanır. Liste dışı videoları bir sonraki ekranda seçebilirsiniz. Ayarlar’da bir kanal seçiliyse yalnızca o kanalın kimliğini içeren kayıtlar işlenir.</p>
       <form method="post" action="import-file.php" enctype="multipart/form-data">
         <?= csrf_field() ?><input type="hidden" name="action" value="upload">
-        <label>Takeout dosyası <span class="hint">(.zip veya içindeki video bilgisi .csv dosyası. <?= e($limitText) ?>)</span>
+        <label>Seçtiğiniz dosya sayısı
+          <input type="number" name="file_count" value="1" min="1" max="<?= $fileCountLimit ?>" required>
+        </label>
+        <label>Takeout dosyası <span class="hint">(.zip veya içindeki video bilgisi .csv dosyası. Bir seferde en fazla <?= $fileCountLimit ?> dosya. <?= e($limitText) ?>)</span>
           <input type="file" name="files[]" multiple required accept=".zip,.csv,application/zip,text/csv">
         </label>
         <button class="btn primary">Yükle ve incele</button>
@@ -173,6 +177,7 @@ admin_header('Eski videoları içe aktar', 'settings');
         <p class="hint">“Sign in to confirm you’re not a bot” benzeri bir hata alırsanız komuta <code>--cookies-from-browser chrome</code> ekleyin (tarayıcı adını kendinize göre değiştirin). Komutta <code>--flat-playlist</code> kullanmayın; tarih ve açıklama vermez, site böyle bir dosyayı kabul etmez.</p>
         <form method="post" action="import-file.php" enctype="multipart/form-data">
           <?= csrf_field() ?><input type="hidden" name="action" value="upload">
+          <input type="hidden" name="file_count" value="1">
           <label>yt-dlp çıktısı <span class="hint">(<code>videolar.jsonl</code>. <?= e($limitText) ?>)</span>
             <input type="file" name="files[]" required accept=".jsonl,.json,.ndjson,.txt,application/json,text/plain">
           </label>

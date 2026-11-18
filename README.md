@@ -44,7 +44,9 @@ site/                  # contents go into public_html
 4. For a fresh install, generate a secret with `php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'` and paste it into `install_token` in `app/config.local.php`. Open `/install.php` over HTTPS, enter the same token, and choose an admin username and password (at least 10 characters, up to 72 bytes with bcrypt).
 5. Delete `install.php` and clear `install_token`. Existing installations can leave the token empty.
 
-On existing installations, the first video write or import updates the YouTube ID columns to compare IDs case-sensitively. The database user needs `ALTER` on the three video tables for this upgrade. An older file import queue can be previewed and confirmed again after updating.
+On existing installations, the first video write or import updates the YouTube ID columns to compare IDs case-sensitively. The database user needs `ALTER` on the three video tables for this upgrade. If a YouTube channel is configured and a file import was queued by an older version, cancel the remaining queue and upload the export again to verify its channel IDs. The importer skips videos already saved.
+
+For a subdirectory deployment, merge the rules and sitemap URL from the blog’s generated `robots.txt` into the domain-root `/robots.txt`. Keep rules for any other applications on the host. Configure HSTS at the hosting level once the whole hostname is ready for HTTPS.
 
 ## Admin panel
 
@@ -65,6 +67,8 @@ New uploads on your channel are imported by `cron/autopost.php`, which reads the
 1. In the admin panel, go to *Ayarlar* → *Otomatik yayın*, enter your channel ID (the `UC...` ID from YouTube Studio → Settings → Channel → Advanced settings; a channel name or `@handle` won't work), choose *draft* or *publish directly*, and save.
 2. In DirectAdmin → Advanced Features → **Cron Jobs**, add a job every 30 minutes (minute `*/30`, everything else `*`) with the command shown on the settings page, e.g. `php /home/USER/domains/EXAMPLE.COM/public_html/cron/autopost.php` (use the PHP path DirectAdmin gives you, e.g. `/usr/local/php82/bin/php`).
 
+After the first scheduled interval, check *Ayarlar → Otomatik yayın durumu* for a run time and result. If it is still blank, check the DirectAdmin job and the PHP CLI path in its command.
+
 **How it behaves**
 
 - **First check imports nothing.** It only marks the videos already on your channel as seen, so your homepage isn't flooded with old videos. Only videos uploaded afterwards are added. Use **Son videoları içe aktar** (or `php cron/autopost.php --import-all`) to also import the latest ones (the feed holds at most 15).
@@ -82,7 +86,7 @@ The channel feed only holds the latest 15 videos. To bring in the whole back cat
 
 1. Open [takeout.google.com](https://takeout.google.com), deselect everything, tick *YouTube and YouTube Music*, and under *All YouTube data included* keep only **video metadata** (Turkish: *video meta verileri*). Do not tick *videos*, which would export the video files themselves.
 2. Export once as `.zip`. Google emails a download link.
-3. Upload the zip as it is (no need to unzip). If the export comes in several parts, select them all. The `.csv` inside works too.
+3. Upload the zip as it is (no need to unzip). For split exports, select all parts within the file-count limit shown on the form. If the export exceeds the limit, combine its metadata CSVs in a single ZIP. The `.csv` inside works too.
 
 The reader works with localized Takeout headers (Turkish and English are recognised by name; any other language falls back to Takeout's fixed 28-column layout after checking the first row), UTF-8 / UTF-16 / Windows-1254 text, `,` or `;` separators, multi-line descriptions and the stray blank rows and leading spaces Takeout is known to produce. Other files in the zip (transcripts, recordings) are ignored.
 
@@ -111,7 +115,7 @@ The key is held in the server-side PHP admin session while the import runs. You 
 **How file imports behave**
 
 - **Validated before anything is created.** The uploaded file is read and checked, then a preview shows how many videos will be added, how many are already on the site, the date range, the five newest titles with thumbnails, and everything that was skipped and why. Nothing touches the site until you press *İçe aktarmayı başlat*.
-- **Strict about content.** Unreadable rows, unknown privacy values and files from a different channel than the one in Settings are reported rather than guessed at. Private and deleted videos are never imported. *Unlisted* videos are listed in the preview and only imported if you tick the box. Live and not-yet-published entries are skipped when identified by the export’s status or timestamp. yt-dlp rows require a title, description field, date and known availability. If YouTube omits availability for some videos, use Takeout for those entries.
+- **Strict about content.** The preview reports unreadable rows and unknown privacy values. When a channel is configured, only rows with a matching channel ID are staged. Rows with a missing or different ID are counted separately. Private and deleted videos are never imported. *Unlisted* videos are listed in the preview and only imported if you tick the box. Live and not-yet-published entries are skipped when identified by the export’s status or timestamp. yt-dlp rows require a title, description field, date and known availability. If YouTube omits availability for some videos, use Takeout for those entries.
 - **Real dates.** Takeout's publish time (or yt-dlp's upload timestamp) is converted to Istanbul time and used as the post date.
 - **Resumable.** Videos wait in a database table (`import_queue`) and are turned into posts in time-limited steps of about 20 seconds that continue automatically, so large channels work on shared hosting. If something fails or you close the tab, you do not need to upload the file again: open the import page from any admin session and continue. A video leaves the queue in the same transaction that saves its post.
 - Everything imported is marked as seen for the autoposter. Unlike the API import, a file import does not mark the autoposter's baseline as complete, so videos uploaded after the file was created are not lost: use **Son videoları içe aktar** once (the completion message reminds you).
