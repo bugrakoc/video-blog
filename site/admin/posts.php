@@ -8,33 +8,45 @@ admin_boot();
 // Actions: delete, publish, unpublish (POST only, CSRF protected)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
-    $id = (int)($_POST['id'] ?? 0);
+    admin_content_lock('admin/posts.php');
+    $id = form_id($_POST, 'id');
     $post = $id ? get_post($id) : null;
-    $action = (string)($_POST['action'] ?? '');
+    $action = form_text($_POST, 'action');
     if (!$post) {
         flash('error', 'Video bulunamadı.');
     } elseif ($action === 'delete') {
-        db()->prepare('DELETE FROM posts WHERE id = ?')->execute([$id]);
-        mark_video_seen($post['youtube_id']);      // a deleted video must not be re-imported by the autoposter
+        autopost_ensure_schema();
+        ensure_video_id_collations();
+        db_transaction(function () use ($id, $post): void {
+            mark_video_seen($post['youtube_id']);
+            db()->prepare('DELETE FROM posts WHERE id = ?')->execute([$id]);
+        });
         flash('ok', 'Silindi: ' . $post['title']);
     } elseif ($action === 'publish') {
         db()->prepare(
             "UPDATE posts SET status = 'published', published_at = COALESCE(published_at, NOW()) WHERE id = ?"
         )->execute([$id]);
-        flash('ok', 'Yayınlandı: ' . $post['title']);
+        $saved = get_post($id);
+        flash('ok', (post_is_live($saved) ? 'Yayınlandı: ' : 'Yayın zamanlandı: ') . $post['title']);
     } elseif ($action === 'unpublish') {
         db()->prepare("UPDATE posts SET status = 'draft' WHERE id = ?")->execute([$id]);
         flash('ok', 'Taslağa alındı: ' . $post['title']);
     }
-    redirect($_SERVER['REQUEST_URI'] ?? url('admin/posts.php'));
+    site_unlock(CONTENT_LOCK);
+    $filters = array_intersect_key($_GET, array_flip(['status', 'q', 'page']));
+    redirect(url('admin/posts.php?' . http_build_query($filters)));
 }
 
 $status = in_array($_GET['status'] ?? '', ['published', 'draft', 'scheduled'], true) ? $_GET['status'] : '';
-$q = trim(is_string($_GET['q'] ?? null) ? $_GET['q'] : '');
+$q = mb_substr(trim(form_text($_GET, 'q')), 0, 100);
 $page = min(max(1, (int)($_GET['page'] ?? 1)), 1000000);
 [$posts, $total] = admin_list_posts($page, $status, $q);
+$lastPage = max(1, (int)ceil($total / ADMIN_PER_PAGE));
+if ($page > $lastPage) {
+    redirect(url('admin/posts.php?' . http_build_query(['status' => $status, 'q' => $q, 'page' => $lastPage])));
+}
 
-$link = fn(int $n) => 'posts.php?' . http_build_query(array_filter(['status' => $status, 'q' => $q, 'page' => $n > 1 ? $n : null]));
+$link = fn(int $n) => 'posts.php?' . http_build_query(array_filter(['status' => $status, 'q' => $q, 'page' => $n > 1 ? $n : null], fn($v) => $v !== '' && $v !== null));
 
 admin_header('Videolar', 'posts');
 ?>
@@ -46,7 +58,7 @@ admin_header('Videolar', 'posts');
 <form class="filters" method="get">
   <div class="tabs">
     <?php foreach (['' => 'Tümü', 'published' => 'Yayında', 'scheduled' => 'Zamanlanmış', 'draft' => 'Taslak'] as $k => $label): ?>
-      <a href="posts.php?<?= e(http_build_query(array_filter(['status' => $k, 'q' => $q]))) ?>" class="<?= $status === $k ? 'on' : '' ?>"><?= e($label) ?></a>
+      <a href="posts.php?<?= e(http_build_query(array_filter(['status' => $k, 'q' => $q], fn($v) => $v !== ''))) ?>" class="<?= $status === $k ? 'on' : '' ?>"><?= e($label) ?></a>
     <?php endforeach; ?>
   </div>
   <input type="hidden" name="status" value="<?= e($status) ?>">
@@ -76,7 +88,7 @@ admin_header('Videolar', 'posts');
           <form method="post" class="inline">
             <?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$p['id'] ?>">
             <?php if ($p['status'] === 'draft'): ?>
-              <button class="link" name="action" value="publish">Yayınla</button>
+              <button class="link" name="action" value="publish"><?= $p['published_at'] && strtotime($p['published_at']) > time() ? 'Zamanla' : 'Yayınla' ?></button>
             <?php else: ?>
               <button class="link" name="action" value="unpublish">Taslağa al</button>
             <?php endif; ?>

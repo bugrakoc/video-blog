@@ -8,9 +8,9 @@ admin_boot();
 $errors = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
-    $current = (string)($_POST['current'] ?? '');
-    $new = (string)($_POST['new'] ?? '');
-    $again = (string)($_POST['again'] ?? '');
+    $current = is_string($_POST['current'] ?? null) ? $_POST['current'] : '';
+    $new = is_string($_POST['new'] ?? null) ? $_POST['new'] : '';
+    $again = is_string($_POST['again'] ?? null) ? $_POST['again'] : '';
 
     $stmt = db()->prepare('SELECT password_hash FROM admins WHERE id = ?');
     $stmt->execute([(int)$_SESSION['admin_id']]);
@@ -24,18 +24,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errors[] = 'Mevcut şifre hatalı.';
     } else {
         login_clear_failures(client_ip());          // right password: a typo in the new one isn't a failed guess
-        if (mb_strlen($new) < 10) {
-            $errors[] = 'Yeni şifre en az 10 karakter olmalı.';
+        if (($error = new_password_error($new)) !== null) {
+            $errors[] = $error;
         } elseif ($new !== $again) {
             $errors[] = 'Yeni şifreler eşleşmiyor.';
-        } elseif ($new === $current) {
+        } elseif (password_verify($new, $hash)) {
             $errors[] = 'Yeni şifre mevcut şifreyle aynı olamaz.';
         }
     }
 
     if (!$errors) {
         $newHash = password_hash($new, PASSWORD_DEFAULT);
-        db()->prepare('UPDATE admins SET password_hash = ? WHERE id = ?')->execute([$newHash, (int)$_SESSION['admin_id']]);
+        if (!replace_admin_password((int)$_SESSION['admin_id'], $hash, $newHash)) {
+            reset_admin_session();
+            flash('error', 'Şifre değiştirildi. Güncel şifreyle tekrar giriş yapın.');
+            redirect(url('admin/login.php'));
+        }
         // Keep this session; every other session no longer matches the password and is logged out on its next request.
         admin_session_login((int)$_SESSION['admin_id'], $newHash);
         flash('ok', 'Şifre değiştirildi. Diğer cihazlardaki oturumlar kapatıldı.');

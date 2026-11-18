@@ -63,7 +63,7 @@ label > input, label > textarea, label > select, label > .row { margin-top: 5px;
 label.check { font-weight: 500; margin-bottom: 6px; display: flex; gap: 8px; align-items: center; }
 label.check input { width: auto; margin: 0; }
 .row { display: flex; gap: 8px; align-items: center; }
-.row input { flex: 1; }
+.row input { flex: 1; min-width: 0; }
 fieldset { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin: 0 0 16px; background: var(--surface); }
 legend { font-weight: 700; padding: 0 6px; }
 details { margin-top: 8px; }
@@ -127,6 +127,6 @@ progress { height: 14px; accent-color: var(--accent); }
   table.list, table.list tbody, table.list tr, table.list td { display: block; width: 100%; }
   table.list tr { padding: 8px 4px; border-bottom: 1px solid var(--border); }
   table.list td { border: 0; padding: 4px 12px; }
-  td.actions { text-align: left; }
+  td.actions { text-align: left; white-space: normal; }
   td.actions > * { margin: 0 12px 0 0; }
 }

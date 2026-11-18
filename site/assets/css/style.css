@@ -6,6 +6,7 @@
   --border: #e7e5e4;
   --accent: #c2410c;
   --accent-soft: #ffedd5;
+  --accent-text: #fff;
   --radius: 12px;
   --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 14px rgba(0,0,0,.05);
   color-scheme: light dark;
@@ -19,6 +20,7 @@
     --border: #2e2b29;
     --accent: #fb923c;
     --accent-soft: #3a2314;
+    --accent-text: #1c1917;
     --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
   }
 }
@@ -61,10 +63,10 @@ main.wrap { padding-top: 28px; padding-bottom: 48px; min-height: 60vh; }
   background: var(--surface); color: var(--muted); font-size: .9rem;
 }
 .cat-nav a:hover { text-decoration: none; color: var(--text); }
-.cat-nav a.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.cat-nav a.active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 
 /* Card grid */
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 22px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(290px, 100%), 1fr)); gap: 22px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); display: flex; flex-direction: column; }
 .card-thumb { position: relative; display: block; aspect-ratio: 16 / 9; background: #000; overflow: hidden; }
 .card-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform .3s; }
@@ -79,7 +81,7 @@ main.wrap { padding-top: 28px; padding-bottom: 48px; min-height: 60vh; }
 }
 .card:hover .play { opacity: 1; }
 .card-body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
-.card h2 { font-size: 1.1rem; line-height: 1.35; margin: 0; }
+.card h2 { overflow-wrap: anywhere; font-size: 1.1rem; line-height: 1.35; margin: 0; }
 .card h2 a { color: var(--text); }
 .card h2 a:hover { color: var(--accent); text-decoration: none; }
 .excerpt { margin: 0; color: var(--muted); font-size: .95rem; line-height: 1.55; flex: 1; }
@@ -93,7 +95,7 @@ main.wrap { padding-top: 28px; padding-bottom: 48px; min-height: 60vh; }
 
 /* Post */
 .post { max-width: 780px; margin: 0 auto; }
-.post h1 { font-size: 2rem; line-height: 1.25; margin: 0 0 8px; letter-spacing: -.01em; }
+.post h1 { overflow-wrap: anywhere; font-size: 2rem; line-height: 1.25; margin: 0 0 8px; letter-spacing: -.01em; }
 .post .meta { color: var(--muted); margin: 0 0 20px; font-size: .92rem; }
 .video { position: relative; aspect-ratio: 16 / 9; border-radius: var(--radius); overflow: hidden; background: #000; box-shadow: var(--shadow); margin-bottom: 28px; }
 .video iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }

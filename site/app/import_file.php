@@ -13,8 +13,9 @@ declare(strict_types=1);
  */
 
 const IMPORT_FILE_MAX_ENTRY = 40 * 1024 * 1024;   // largest single file / zip entry we read
-const IMPORT_FILE_MAX_TOTAL = 80 * 1024 * 1024;   // largest total we read per upload
+const IMPORT_FILE_MAX_TOTAL = 80 * 1024 * 1024;   // upper limit before checking the server's memory budget
 const IMPORT_BATCH = 20;
+const IMPORT_MAX_DESCRIPTION_BYTES = 100000;
 
 /* ---------- Schema / queue ---------- */
 
@@ -23,7 +24,7 @@ function import_ensure_schema(): void
     autopost_ensure_schema();
     db()->exec(
         "CREATE TABLE IF NOT EXISTS import_queue (
-            youtube_id VARCHAR(20) NOT NULL PRIMARY KEY,
+            youtube_id VARCHAR(20) COLLATE utf8mb4_bin NOT NULL PRIMARY KEY,
             title VARCHAR(255) NOT NULL,
             description MEDIUMTEXT NULL,
             published_at DATETIME NULL,
@@ -33,35 +34,49 @@ function import_ensure_schema(): void
     );
 }
 
-/** Replace the whole queue with $videos (each: id, title, description, published, privacy). */
-function import_queue_replace(array $videos): void
+/** Store the queue and its preview together. Call with the content lock held. */
+function import_queue_replace(array $videos, array $job): void
 {
-    import_ensure_schema();
-    $pdo = db();
-    $pdo->beginTransaction();
-    try {
+    db_transaction(function () use ($videos, $job): void {
+        $pdo = db();
         $pdo->exec('DELETE FROM import_queue');
         $ins = $pdo->prepare('INSERT INTO import_queue (youtube_id, title, description, published_at, privacy) VALUES (?,?,?,?,?)');
         foreach ($videos as $v) {
             $ins->execute([$v['id'], $v['title'], $v['description'], $v['published'], $v['privacy']]);
         }
-        $pdo->commit();
-    } catch (Throwable $e) {
-        $pdo->rollBack();
-        throw $e;
+        import_file_store_job($job);
+    });
+}
+
+function import_file_store_job(?array $job): void
+{
+    set_setting('import_file_job', $job === null ? '' : json_out($job));
+}
+
+function import_file_job(string $channel): ?array
+{
+    $raw = db()->query("SELECT `value` FROM settings WHERE `key` = 'import_file_job'")->fetchColumn();
+    if (is_string($raw) && $raw !== '') {
+        return json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
     }
+    // A pre-upgrade queue can still be previewed and confirmed.
+    if (db()->query('SELECT 1 FROM import_queue LIMIT 1')->fetchColumn()) {
+        return ['id' => 'legacy', 'channel' => $channel, 'report' => null, 'run' => null];
+    }
+    return null;
 }
 
 function import_queue_clear(): void
 {
-    import_ensure_schema();
-    db()->exec('DELETE FROM import_queue');
+    db_transaction(function (): void {
+        db()->exec('DELETE FROM import_queue');
+        import_file_store_job(null);
+    });
 }
 
 /** Counts for the preview: total, already on the site, public/unlisted, date range. */
 function import_queue_stats(): array
 {
-    import_ensure_schema();
     $r = db()->query(
         "SELECT COUNT(*) AS total,
                 SUM(q.privacy = 'public') AS public_n,
@@ -70,7 +85,7 @@ function import_queue_stats(): array
                 SUM(p.id IS NULL AND q.privacy = 'public') AS new_public,
                 SUM(p.id IS NULL AND q.privacy = 'unlisted') AS new_unlisted,
                 MIN(q.published_at) AS oldest, MAX(q.published_at) AS newest
-         FROM import_queue q LEFT JOIN posts p ON p.youtube_id = q.youtube_id"
+         FROM import_queue q LEFT JOIN posts p ON p.youtube_id = q.youtube_id COLLATE utf8mb4_bin"
     )->fetch();
     foreach (['total', 'public_n', 'unlisted_n', 'existing', 'new_public', 'new_unlisted'] as $k) {
         $r[$k] = (int)$r[$k];
@@ -138,11 +153,17 @@ function import_expand_uploads(array $uploads): array
 {
     $blobs = [];
     $notes = [];
-    $budget = IMPORT_FILE_MAX_TOTAL;
+    $memoryLimit = ini_parse_quantity(ini_get('memory_limit'));
+    $budget = $memoryLimit > 0
+        ? min(IMPORT_FILE_MAX_TOTAL, max(0, intdiv($memoryLimit - memory_get_usage(true), 4)))
+        : IMPORT_FILE_MAX_TOTAL;
 
     foreach ($uploads as $up) {
         $label = import_label((string)$up['name']);
-        $size = (int)filesize($up['path']);
+        $size = filesize($up['path']);
+        if ($size === false) {
+            throw new RuntimeException('“' . $label . '” okunamadı.');
+        }
         $fh = fopen($up['path'], 'rb');
         $magic = $fh ? (string)fread($fh, 4) : '';
         if ($fh) {
@@ -177,6 +198,10 @@ function import_expand_uploads(array $uploads): array
                     $notes[] = '“' . $entryLabel . '” zip içinden okunamadı.';
                     continue;
                 }
+                if (strlen($data) > min(IMPORT_FILE_MAX_ENTRY, $budget)) {
+                    $notes[] = '“' . $entryLabel . '” çok büyük olduğu için atlandı.';
+                    continue;
+                }
                 $budget -= strlen($data);
                 $text = import_decode_text($data);
                 if ($text === null) {
@@ -192,7 +217,10 @@ function import_expand_uploads(array $uploads): array
         if ($size > IMPORT_FILE_MAX_ENTRY || $size > $budget) {
             throw new RuntimeException('“' . $label . '” çok büyük (en fazla ' . (int)(IMPORT_FILE_MAX_ENTRY / 1048576) . ' MB). Yalnızca video meta verilerini içeren dosyayı yükleyin.');
         }
-        $data = (string)file_get_contents($up['path']);
+        $data = file_get_contents($up['path'], false, null, 0, min(IMPORT_FILE_MAX_ENTRY, $budget) + 1);
+        if ($data === false || strlen($data) > min(IMPORT_FILE_MAX_ENTRY, $budget)) {
+            throw new RuntimeException('“' . $label . '” okunamadı veya dosya çok büyük.');
+        }
         $budget -= strlen($data);
         $text = import_decode_text($data);
         if ($text === null) {
@@ -243,28 +271,32 @@ function import_takeout_columns(array $header): array
 /** Layout of the 28-column video table, used only when the header language is not recognised. */
 const IMPORT_TAKEOUT_POSITIONS = ['id' => 0, 'description' => 4, 'channel' => 6, 'title' => 22, 'privacy' => 24, 'state' => 25, 'created' => 26, 'published' => 27];
 
-function import_is_iso_date(string $v): bool
+/** Read nonempty CSV records, using the first nonempty record to select the delimiter. */
+function import_csv_rows(string $text): Generator
 {
-    return (bool)preg_match('/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/', trim($v));
-}
-
-/** Split CSV text into rows. Accepts "," and ";" (a CSV re-saved by Turkish Excel uses ";"). */
-function import_csv_rows(string $text): array
-{
-    $firstLine = strtok($text, "\n") ?: '';
-    $delim = substr_count($firstLine, ';') > substr_count($firstLine, ',') ? ';' : ',';
     $fh = fopen('php://temp', 'r+');
     fwrite($fh, $text);
     rewind($fh);
-    $rows = [];
-    while (($row = fgetcsv($fh, 0, $delim, '"', '')) !== false) {
-        if ($row === [null] || !array_filter($row, fn($c) => trim((string)$c) !== '')) {
-            continue;                                   // blank row
+    $delim = ',';
+    try {
+        while (($line = fgets($fh)) !== false) {
+            if (trim($line) === '') {
+                continue;
+            }
+            $comma = str_getcsv($line, ',', '"', '');
+            $semi = str_getcsv($line, ';', '"', '');
+            $delim = count($semi) > count($comma) ? ';' : ',';
+            yield $delim === ';' ? $semi : $comma;
+            break;
         }
-        $rows[] = $row;
+        while (($row = fgetcsv($fh, 0, $delim, '"', '')) !== false) {
+            if ($row !== [null] && array_filter($row, fn($c) => trim((string)$c) !== '')) {
+                yield $row;
+            }
+        }
+    } finally {
+        fclose($fh);
     }
-    fclose($fh);
-    return $rows;
 }
 
 /**
@@ -274,21 +306,22 @@ function import_csv_rows(string $text): array
 function import_parse_takeout_csv(string $text, string $label): ?array
 {
     $rows = import_csv_rows($text);
-    if (count($rows) < 1) {
+    $header = $rows->current();
+    if ($header === null) {
         return null;
     }
-    $header = array_shift($rows);
+    $rows->next();
     $cols = import_takeout_columns($header);
     $byPosition = false;
 
-    $named = isset($cols['id'], $cols['title']) && (isset($cols['published']) || isset($cols['created']));
+    $named = isset($cols['id'], $cols['title'], $cols['description'], $cols['privacy']) && (isset($cols['published']) || isset($cols['created']));
     if (!$named) {
         // Unknown header language: fall back to the fixed 28-column layout, but only if the data fits it.
-        if (count($header) !== 28 || !$rows) {
+        if (count($header) !== 28 || !$rows->valid()) {
             return null;
         }
-        $first = $rows[0];
-        if (!preg_match('/^[A-Za-z0-9_-]{11}$/', trim((string)($first[0] ?? ''))) || !import_is_iso_date((string)($first[27] ?? ''))) {
+        $first = $rows->current();
+        if (!preg_match('/^[A-Za-z0-9_-]{11}$/', trim((string)($first[0] ?? ''))) || (video_date_to_db($first[27] ?? null) ?? video_date_to_db($first[26] ?? null)) === null) {
             return null;
         }
         $cols = IMPORT_TAKEOUT_POSITIONS;
@@ -299,8 +332,13 @@ function import_parse_takeout_csv(string $text, string $label): ?array
     $src['by_position'] = $byPosition;
     $get = fn(array $r, string $k): string => isset($cols[$k]) ? trim((string)($r[$cols[$k]] ?? '')) : '';
 
-    foreach ($rows as $n => $r) {
-        $where = $label . ', satır ' . ($n + 2);
+    for (; $rows->valid(); $rows->next()) {
+        $r = $rows->current();
+        $where = $label . ', kayıt ' . $rows->key();
+        if (count($r) !== count($header) || strlen($r[$cols['description']] ?? '') > IMPORT_MAX_DESCRIPTION_BYTES) {
+            import_note_invalid($src, $where, 'sütun sayısı veya açıklama boyutu geçersiz');
+            continue;
+        }
         $id = $get($r, 'id');                            // Takeout sometimes leaves a leading space on IDs
         if (!preg_match('/^[A-Za-z0-9_-]{11}$/', $id)) {
             import_note_invalid($src, $where, 'geçersiz video kimliği');
@@ -309,15 +347,17 @@ function import_parse_takeout_csv(string $text, string $label): ?array
         $privacy = import_privacy($get($r, 'privacy'));
         if ($privacy === 'private') {
             $src['skipped']['private']++;
+            $src['excluded_ids'][$id] = true;
             continue;
         }
         if ($privacy === null) {
-            $raw = $get($r, 'privacy');
+            $raw = mb_substr($get($r, 'privacy'), 0, 80);
             $src['unknown_privacy'][$raw] = ($src['unknown_privacy'][$raw] ?? 0) + 1;
             continue;
         }
-        if (preg_match('/(basarisiz|failed|reddedil|rejected|silin|delet|iptal|abandon)/', fold($get($r, 'state')))) {
+        if (preg_match('/(basarisiz|failed|reddedil|rejected|silin|delet|iptal|abandon|processing|unprocessed|isleniyor)/', fold($get($r, 'state')))) {
             $src['skipped']['state']++;
+            $src['excluded_ids'][$id] = true;
             continue;
         }
         $when = $get($r, 'published') !== '' ? $get($r, 'published') : $get($r, 'created');
@@ -326,7 +366,16 @@ function import_parse_takeout_csv(string $text, string $label): ?array
             import_note_invalid($src, $where, 'yayın tarihi okunamadı');
             continue;
         }
+        if (strtotime($published) > time()) {
+            $src['skipped']['live']++;
+            $src['excluded_ids'][$id] = true;
+            continue;
+        }
         $title = $get($r, 'title');
+        if ($title === '') {
+            import_note_invalid($src, $where, 'başlık yok');
+            continue;
+        }
         $src['videos'][] = [
             'id' => $id,
             'title' => mb_substr($title !== '' ? $title : 'Başlıksız video', 0, 255),
@@ -357,12 +406,15 @@ function import_ytdlp_objects(string $text, string $label): array
 {
     $text = trim($text);
     $objects = [];
+    if ($text === '') {
+        return [];
+    }
     if ($text[0] === '[') {
         $all = json_decode($text, true);
         if (!is_array($all)) {
             throw new RuntimeException('“' . $label . '” geçerli bir JSON dizisi değil.');
         }
-        return array_values(array_filter($all, 'is_array'));
+        return $all;
     }
     $lines = preg_split('/\r\n|\n|\r/', $text);
     $okLines = true;
@@ -393,10 +445,12 @@ function import_ytdlp_flatten(array $objs): array
 {
     $out = [];
     foreach ($objs as $o) {
-        if (isset($o['entries']) && is_array($o['entries'])) {
-            array_push($out, ...import_ytdlp_flatten(array_values(array_filter($o['entries'], 'is_array'))));
-        } elseif (isset($o['id'])) {
-            $out[] = $o;
+        if (is_array($o) && isset($o['entries']) && is_array($o['entries'])) {
+            foreach (import_ytdlp_flatten($o['entries']) as $entry) {
+                $out[] = $entry;
+            }
+        } else {
+            $out[] = is_array($o) ? $o : [];
         }
     }
     return $out;
@@ -410,16 +464,14 @@ function import_parse_ytdlp(string $text, string $label): array
         throw new RuntimeException('“' . $label . '” içinde video bulunamadı.');
     }
 
-    $dated = 0;
-    $described = 0;
     foreach ($entries as $n => $o) {
         $where = $label . ', kayıt ' . ($n + 1);
-        $id = trim((string)($o['id'] ?? ''));
+        $id = trim(form_text($o, 'id'));
         if (!preg_match('/^[A-Za-z0-9_-]{11}$/', $id)) {
             import_note_invalid($src, $where, 'geçersiz video kimliği');
             continue;
         }
-        $title = trim((string)($o['title'] ?? ''));
+        $title = trim(form_text($o, 'title'));
 
         $published = null;
         foreach (['timestamp', 'release_timestamp'] as $k) {
@@ -428,57 +480,56 @@ function import_parse_ytdlp(string $text, string $label): array
                 break;
             }
         }
-        if ($published === null && isset($o['upload_date']) && preg_match('/^(\d{4})(\d{2})(\d{2})$/', (string)$o['upload_date'], $m)) {
-            $published = video_date_to_db("$m[1]-$m[2]-$m[3]T09:00:00Z");   // date only: noon in Istanbul
+        if ($published === null && preg_match('/^(\d{4})(\d{2})(\d{2})$/D', form_text($o, 'upload_date'), $m)) {
+            $published = video_date_to_db("$m[1]-$m[2]-$m[3]T12:00:00");
+            if ($published !== null && substr($published, 0, 10) === date('Y-m-d')) {
+                $published = min($published, date('Y-m-d H:i:s'));
+            }
         }
-        if ($published !== null) {
-            $dated++;
-        }
-        if (isset($o['description']) && is_string($o['description'])) {
-            $described++;
-        }
-
         $avail = $o['availability'] ?? null;
         if (in_array($title, ['[Private video]', '[Deleted video]', 'Private video', 'Deleted video'], true)
             || in_array($avail, ['private', 'needs_auth', 'premium_only', 'subscriber_only'], true)) {
             $src['skipped']['private']++;
+            $src['excluded_ids'][$id] = true;
             continue;
         }
         if (in_array($o['live_status'] ?? null, ['is_live', 'is_upcoming'], true)) {
             $src['skipped']['live']++;
+            $src['excluded_ids'][$id] = true;
             continue;
         }
-        if ($avail === null || $avail === 'public') {
+        if ($avail === 'public') {
             $privacy = 'public';
         } elseif ($avail === 'unlisted') {
             $privacy = 'unlisted';
         } else {
-            $key = (string)$avail;
+            $key = is_string($avail) ? mb_substr($avail, 0, 80) : '(boş veya geçersiz)';
             $src['unknown_privacy'][$key] = ($src['unknown_privacy'][$key] ?? 0) + 1;
             continue;
         }
         if ($published === null) {
-            import_note_invalid($src, $where, 'yükleme tarihi yok');
+            import_note_invalid($src, $where, 'yükleme tarihi yok veya geçersiz');
+            continue;
+        }
+        if (strtotime($published) > time()) {
+            $src['skipped']['live']++;
+            $src['excluded_ids'][$id] = true;
+            continue;
+        }
+        if ($title === '' || !is_string($o['description'] ?? null) || strlen($o['description']) > IMPORT_MAX_DESCRIPTION_BYTES) {
+            import_note_invalid($src, $where, 'başlık veya açıklama eksik ya da geçersiz');
             continue;
         }
         $src['videos'][] = [
             'id' => $id,
-            'title' => mb_substr($title !== '' ? $title : 'Başlıksız video', 0, 255),
-            'description' => (string)($o['description'] ?? ''),
+            'title' => mb_substr($title, 0, 255),
+            'description' => $o['description'],
             'published' => $published,
             'privacy' => $privacy,
-            'channel' => trim((string)($o['channel_id'] ?? '')),
+            'channel' => trim(form_text($o, 'channel_id')),
         ];
     }
 
-    // A --flat-playlist run lists IDs and titles only. Without dates and descriptions the posts would be
-    // empty shells, which is exactly the degraded import this feature refuses to do.
-    if ($dated === 0 || (count($entries) >= 3 && $described === 0)) {
-        throw new RuntimeException(
-            '“' . $label . '” içinde yükleme tarihleri' . ($dated === 0 ? '' : ' ve açıklamalar')
-            . ' yok. Komutta “--flat-playlist” kullanılmış olabilir; yalnızca kimlik ve başlık verir. Rehberdeki komutu olduğu gibi çalıştırıp yeni dosyayı yükleyin.'
-        );
-    }
     return $src;
 }
 
@@ -487,7 +538,7 @@ function import_parse_ytdlp(string $text, string $label): array
 function import_new_source(string $kind): array
 {
     return [
-        'kind' => $kind, 'videos' => [], 'by_position' => false,
+        'kind' => $kind, 'videos' => [], 'excluded_ids' => [], 'by_position' => false,
         'skipped' => ['private' => 0, 'state' => 0, 'live' => 0, 'other_channel' => 0],
         'unknown_privacy' => [], 'invalid' => [], 'invalid_count' => 0,
     ];
@@ -520,7 +571,15 @@ function import_file_analyze(array $uploads, string $channel): array
             continue;
         }
         if ($trim[0] === '{' || $trim[0] === '[') {
-            $src = import_parse_ytdlp($text, $label);          // throws with a precise message when unusable
+            try {
+                $src = import_parse_ytdlp($text, $label);
+            } catch (RuntimeException $e) {
+                if (count($blobs) === 1) {
+                    throw $e;
+                }
+                $notes[] = $e->getMessage();
+                continue;
+            }
         } else {
             $src = import_parse_takeout_csv($text, $label);
             if ($src === null) {
@@ -543,6 +602,7 @@ function import_file_analyze(array $uploads, string $channel): array
     // Merge, drop duplicates (a video can appear in several CSVs of a split export).
     $videos = [];
     $dupes = 0;
+    $excludedIds = [];
     $skipped = ['private' => 0, 'state' => 0, 'live' => 0, 'other_channel' => 0];
     $unknown = [];
     $invalid = [];
@@ -552,6 +612,7 @@ function import_file_analyze(array $uploads, string $channel): array
     $byPosition = false;
     foreach ($sources as $s) {
         $kinds[$s['kind']] = true;
+        $excludedIds += $s['excluded_ids'];
         $byPosition = $byPosition || $s['by_position'];
         foreach ($s['skipped'] as $k => $n) {
             $skipped[$k] += $n;
@@ -565,8 +626,15 @@ function import_file_analyze(array $uploads, string $channel): array
             if ($v['channel'] !== '') {
                 $channels[$v['channel']] = ($channels[$v['channel']] ?? 0) + 1;
             }
+            if ($channel !== '' && $v['channel'] !== '' && $v['channel'] !== $channel) {
+                $skipped['other_channel']++;
+                continue;
+            }
             if (isset($videos[$v['id']])) {
                 $dupes++;
+                if ($v['privacy'] === 'unlisted') {
+                    $videos[$v['id']]['privacy'] = 'unlisted';
+                }
                 continue;
             }
             $videos[$v['id']] = $v;
@@ -581,15 +649,7 @@ function import_file_analyze(array $uploads, string $channel): array
             . 'Doğru hesap/kanal için dosyayı yeniden oluşturun; kanalı gerçekten değiştirdiyseniz önce Ayarlar’daki kanal kimliğini güncelleyin.'
         );
     }
-    if ($channel !== '' && $channels) {
-        foreach ($videos as $id => $v) {
-            if ($v['channel'] !== '' && $v['channel'] !== $channel) {
-                unset($videos[$id]);
-                $skipped['other_channel']++;
-            }
-        }
-    }
-
+    $videos = array_diff_key($videos, $excludedIds);
     if (!$videos) {
         $why = [];
         if ($skipped['private'] > 0) {
@@ -598,26 +658,28 @@ function import_file_analyze(array $uploads, string $channel): array
         if ($skipped['live'] > 0) {
             $why[] = $skipped['live'] . ' canlı/planlanmış';
         }
+        if ($invalidCount > 0) {
+            $why[] = $invalidCount . ' eksik/geçersiz';
+        }
+        if ($unknown) {
+            $why[] = array_sum($unknown) . ' gizliliği bilinmeyen';
+        }
         throw new RuntimeException('İçe aktarılabilecek video bulunamadı' . ($why ? ' (' . implode(', ', $why) . ' video atlandı)' : '') . '.');
     }
 
-    $dates = array_filter(array_column($videos, 'published'));
     return [
         'videos' => array_values($videos),
         'report' => [
             'kind' => implode(' + ', array_keys($kinds)),
-            'files' => $recognized,
-            'ignored' => $ignored,
-            'notes' => $notes,
+            'files' => array_map(fn($v) => mb_substr($v, 0, 120), array_slice($recognized, 0, 7)),
+            'notes' => array_map(fn($v) => mb_substr($v, 0, 200), array_slice($notes, 0, 10)),
             'skipped' => $skipped,
-            'unknown_privacy' => $unknown,
-            'invalid' => $invalid,
+            'unknown_privacy' => array_slice($unknown, 0, 20, true),
+            'invalid' => array_map(fn($v) => mb_substr($v, 0, 200), $invalid),
             'invalid_count' => $invalidCount,
             'duplicates' => $dupes,
-            'channel' => $channels ? array_key_first($channels) : null,
+            'channel' => $channel !== '' && isset($channels[$channel]) ? $channel : ($channels ? mb_substr((string)array_key_first($channels), 0, 80) : null),
             'by_position' => $byPosition,
-            'oldest' => $dates ? min($dates) : null,
-            'newest' => $dates ? max($dates) : null,
         ],
     ];
 }
@@ -629,7 +691,7 @@ function import_file_new_state(string $mode, int $total, int $skippedUnlisted): 
     return [
         'mode' => $mode === 'publish' ? 'publish' : 'draft',
         'total' => $total, 'skipped_unlisted' => $skippedUnlisted,
-        'imported' => 0, 'existing' => 0, 'error' => null, 'done' => false,
+        'imported' => 0, 'existing' => 0, 'error' => null,
     ];
 }
 
@@ -637,47 +699,36 @@ function import_file_new_state(string $mode, int $total, int $skippedUnlisted): 
  * Turn queued videos into posts until the queue is empty or the time budget runs out.
  * Resumable by design: a row leaves the queue only after its post is saved. Returns true when finished.
  */
-function import_file_run(array &$state, float $budgetSeconds): bool
+function import_file_run(array &$job, float $budgetSeconds): bool
 {
-    import_ensure_schema();
-    $pdo = db();
-
-    $lock = $pdo->prepare('SELECT GET_LOCK(?, 0)');
-    $lock->execute([AUTOPOST_LOCK]);
-    if ((int)$lock->fetchColumn() !== 1) {
-        $state['error'] = 'Başka bir içe aktarma veya otomatik kontrol çalışıyor. Birkaç saniye sonra tekrar deneyin.';
-        return false;
-    }
-
     $started = microtime(true);
-    $state['error'] = null;
-    try {
-        $del = $pdo->prepare('DELETE FROM import_queue WHERE youtube_id = ?');
-        do {
-            $rows = $pdo->query(
-                'SELECT youtube_id, title, description, published_at FROM import_queue
-                 ORDER BY published_at IS NULL, published_at, youtube_id LIMIT ' . IMPORT_BATCH
-            )->fetchAll();
-            if (!$rows) {
-                $state['done'] = true;
-                return true;
-            }
+    $pdo = db();
+    do {
+        $rows = $pdo->query(
+            'SELECT youtube_id, title, description, published_at FROM import_queue
+             ORDER BY published_at IS NULL, published_at, youtube_id LIMIT ' . IMPORT_BATCH
+        )->fetchAll();
+        if (!$rows) {
+            return true;
+        }
+        $job = db_transaction(function () use ($pdo, $job, $rows): array {
+            $del = $pdo->prepare('DELETE FROM import_queue WHERE youtube_id = ?');
+            $job['run']['error'] = null;
             foreach ($rows as $r) {
                 $result = import_save_video([
                     'id' => $r['youtube_id'], 'title' => $r['title'],
                     'description' => (string)$r['description'], 'published' => $r['published_at'],
-                ], $state['mode']);
-                $state[$result]++;
+                ], $job['run']['mode']);
                 $del->execute([$r['youtube_id']]);
+                $job['run'][$result]++;
             }
-            if (count($rows) < IMPORT_BATCH) {          // a short batch means the queue is now empty
-                $state['done'] = true;
-                return true;
-            }
-        } while ((microtime(true) - $started) < $budgetSeconds);
-        return false;
-    } finally {
-        $rel = $pdo->prepare('SELECT RELEASE_LOCK(?)');
-        $rel->execute([AUTOPOST_LOCK]);
-    }
+            import_file_store_job($job);
+            return $job;
+        });
+        if (count($rows) < IMPORT_BATCH) {
+            return true;
+        }
+    } while ((microtime(true) - $started) < $budgetSeconds);
+
+    return false;
 }

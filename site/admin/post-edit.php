@@ -5,7 +5,7 @@ require __DIR__ . '/../app/bootstrap.php';
 require APP_PATH . '/admin.php';
 admin_boot();
 
-$id = (int)($_GET['id'] ?? 0);
+$id = form_id($_GET, 'id');
 $post = $id ? get_post($id) : null;
 if ($id && !$post) {
     flash('error', 'Video bulunamadı.');
@@ -30,12 +30,24 @@ $form = [
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
-    foreach (['youtube_url', 'title', 'slug', 'body', 'excerpt', 'meta_description', 'published_at', 'new_categories'] as $k) {
-        $form[$k] = trim((string)($_POST[$k] ?? ''));
+    admin_content_lock('admin/post-edit.php' . ($id ? '?id=' . $id : ''));
+    $post = $id ? get_post($id) : null;
+    if ($id && !$post) {
+        site_unlock(CONTENT_LOCK);
+        flash('error', 'Video bulunamadı.');
+        redirect(url('admin/posts.php'));
     }
-    // Body keeps its inner whitespace/newlines; only trim the ends.
+    autopost_ensure_schema();
+    ensure_video_id_collations();
+    foreach (['youtube_url', 'title', 'slug', 'body', 'excerpt', 'meta_description', 'published_at', 'new_categories'] as $k) {
+        $form[$k] = form_text($_POST, $k);
+        if ($k !== 'body') {
+            $form[$k] = trim($form[$k]);
+        }
+    }
     $form['status'] = ($_POST['status'] ?? '') === 'published' ? 'published' : 'draft';
-    $form['category_ids'] = array_map('intval', (array)($_POST['category_ids'] ?? []));
+    $submittedCats = is_array($_POST['category_ids'] ?? null) ? $_POST['category_ids'] : [];
+    $form['category_ids'] = array_map(fn($value) => form_id(['id' => $value], 'id'), $submittedCats);
 
     $ytId = youtube_id($form['youtube_url']);
     if (!$ytId) {
@@ -55,36 +67,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (mb_strlen($form['meta_description']) > 300) {
         $errors[] = 'Meta açıklama en fazla 300 karakter olabilir.';
     }
+    if (strlen($form['excerpt']) > 65535 || strlen($form['body']) > 16777215) {
+        $errors[] = 'Metin veya özet çok uzun.';
+    }
     $publishedAt = parse_local_datetime($form['published_at']);
     if ($form['published_at'] !== '' && $publishedAt === null) {
         $errors[] = 'Yayın tarihi geçersiz.';
     }
 
     if (!$errors) {
-        $cats = array_merge($form['category_ids'], resolve_new_categories($form['new_categories']));
-        $newId = save_post([
-            'title'            => $form['title'],
-            'slug'             => $form['slug'],
-            'youtube_id'       => $ytId,
-            'body'             => $form['body'],
-            'excerpt'          => $form['excerpt'],
-            'meta_description' => $form['meta_description'],
-            'status'           => $form['status'],
-            'published_at'     => $publishedAt,
-            'source'           => $post['source'] ?? 'manual',
-            'category_ids'     => $cats,
-        ], $id ?: null);
-        if ($post && $post['youtube_id'] !== $ytId) {
-            mark_video_seen($post['youtube_id']);   // the old video was removed from the site on purpose
-        }
+        $newId = db_transaction(function () use ($form, $id, $post, $publishedAt, $ytId): int {
+            $cats = array_merge($form['category_ids'], resolve_new_categories($form['new_categories']));
+            $newId = save_post([
+                'title'            => $form['title'],
+                'slug'             => $form['slug'],
+                'youtube_id'       => $ytId,
+                'body'             => $form['body'],
+                'excerpt'          => $form['excerpt'],
+                'meta_description' => $form['meta_description'],
+                'status'           => $form['status'],
+                'published_at'     => $publishedAt,
+                'source'           => $post['source'] ?? 'manual',
+                'category_ids'     => $cats,
+            ], $id ?: null);
+            if ($post && $post['youtube_id'] !== $ytId) {
+                mark_video_seen($post['youtube_id']);   // the old video was removed from the site on purpose
+            }
+            return $newId;
+        });
+        site_unlock(CONTENT_LOCK);
         $saved = get_post($newId);
         $msg = $id ? 'Kaydedildi.' : 'Video eklendi.';
-        if ($saved && $form['slug'] !== '' && slugify($form['slug']) !== $saved['slug']) {
+        if ($saved && $form['slug'] !== '' && requested_slug($form['slug'], $form['title']) !== $saved['slug']) {
             $msg .= ' Bu adres kullanıldığı için “' . $saved['slug'] . '” olarak ayarlandı.';
         }
         flash('ok', $msg);
         redirect(url('admin/post-edit.php?id=' . $newId));
     }
+    site_unlock(CONTENT_LOCK);
 }
 
 $isNew = !$id;
@@ -110,7 +130,7 @@ admin_header($isNew ? 'Yeni video' : 'Videoyu düzenle', 'posts');
           <input type="text" id="youtube_url" name="youtube_url" value="<?= e($form['youtube_url']) ?>" placeholder="https://www.youtube.com/watch?v=…" required>
           <button type="button" class="btn" id="fetch-title">Başlığı getir</button>
         </div>
-        <span class="hint" id="yt-status">Bağlantıyı yapıştırın; başlık boşsa otomatik doldurulur.</span>
+        <span class="hint" id="yt-status" role="status">Bağlantıyı yapıştırın; başlık boşsa otomatik doldurulur.</span>
       </label>
 
       <div class="preview" id="yt-preview" <?= youtube_id($form['youtube_url']) ? '' : 'hidden' ?>>
@@ -122,7 +142,8 @@ admin_header($isNew ? 'Yeni video' : 'Videoyu düzenle', 'posts');
       </label>
 
       <label>Metin <span class="hint">(Markdown; video açıklamasını buraya yapıştırın)</span>
-        <textarea name="body" rows="16"><?= e($form['body']) ?></textarea>
+        <textarea name="body" rows="16">
+<?= e($form['body']) ?></textarea>
       </label>
       <p class="hint md-help">
         **kalın** · *italik* · [bağlantı](https://…) · <code>## Başlık</code> · <code>- liste</code> · satır sonu otomatik
@@ -132,7 +153,7 @@ admin_header($isNew ? 'Yeni video' : 'Videoyu düzenle', 'posts');
       <details <?= ($form['excerpt'] !== '' || $form['meta_description'] !== '' || $form['slug'] !== '') ? 'open' : '' ?>>
         <summary>Gelişmiş: adres, özet, SEO</summary>
         <label>Adres (slug) <span class="hint">boş bırakırsanız başlıktan üretilir; yalnızca a-z, 0-9 ve tire</span>
-          <input type="text" id="slug" name="slug" value="<?= e($form['slug']) ?>" maxlength="100" placeholder="otomatik">
+          <input type="text" id="slug" name="slug" value="<?= e($form['slug']) ?>" maxlength="190" placeholder="otomatik">
         </label>
         <label>Özet <span class="hint">(boşsa metinden otomatik üretilir)</span>
           <textarea name="excerpt" rows="3"><?= e($form['excerpt']) ?></textarea>
@@ -149,7 +170,7 @@ admin_header($isNew ? 'Yeni video' : 'Videoyu düzenle', 'posts');
         <label class="check"><input type="radio" name="status" value="draft" <?= $form['status'] === 'draft' ? 'checked' : '' ?>> Taslak</label>
         <label class="check"><input type="radio" name="status" value="published" <?= $form['status'] === 'published' ? 'checked' : '' ?>> Yayında</label>
         <label>Yayın tarihi
-          <input type="datetime-local" name="published_at" value="<?= e($form['published_at']) ?>">
+          <input type="datetime-local" step="1" name="published_at" value="<?= e($form['published_at']) ?>">
           <span class="hint">Boşsa yayınlandığı an. Gelecek bir tarih yazarsanız o zamana kadar gizli kalır.</span>
         </label>
         <button class="btn primary wide"><?= $isNew ? 'Ekle' : 'Kaydet' ?></button>

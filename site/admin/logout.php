@@ -7,14 +7,7 @@ admin_boot(false);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
-    $_SESSION = [];
-    if (ini_get('session.use_cookies')) {
-        $p = session_get_cookie_params();
-        setcookie(session_name(), '', time() - 3600, $p['path'], $p['domain'] ?? '', (bool)$p['secure'], true);
-    }
-    session_destroy();
-    start_session();
-    session_regenerate_id(true);    // sends a fresh cookie, so the message below survives the cookie deletion above
+    reset_admin_session();
     flash('ok', 'Çıkış yapıldı.');
     redirect(url('admin/login.php'));
 }

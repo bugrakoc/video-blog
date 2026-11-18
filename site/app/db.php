@@ -8,9 +8,10 @@ function db(): PDO
         return $pdo;
     }
     $c = config('db');
+    $port = isset($c['port']) ? ';port=' . (int)$c['port'] : '';
     $offset = (new DateTimeImmutable('now'))->format('P');   // e.g. +03:00
     $pdo = new PDO(
-        "mysql:host={$c['host']};dbname={$c['name']};charset=utf8mb4",
+        "mysql:host={$c['host']};dbname={$c['name']};charset=utf8mb4$port",
         $c['user'],
         $c['pass'],
         [
@@ -21,4 +22,40 @@ function db(): PDO
         ]
     );
     return $pdo;
+}
+
+const CONTENT_LOCK = 'content';
+
+/** MariaDB advisory locks are server-wide, so scope them to this site's database. */
+function site_lock(string $purpose, int $timeout = 0): bool
+{
+    $stmt = db()->prepare('SELECT GET_LOCK(?, ?)');
+    $stmt->execute([site_lock_name($purpose), $timeout]);
+    return (int)$stmt->fetchColumn() === 1;
+}
+
+function site_unlock(string $purpose): void
+{
+    db()->prepare('DO RELEASE_LOCK(?)')->execute([site_lock_name($purpose)]);
+}
+
+function site_lock_name(string $purpose): string
+{
+    return 'video-blog:' . sha1((string)config('db')['name'] . ':' . $purpose);
+}
+
+function db_transaction(callable $work)
+{
+    $pdo = db();
+    $pdo->beginTransaction();
+    try {
+        $result = $work();
+        $pdo->commit();
+        return $result;
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
 }

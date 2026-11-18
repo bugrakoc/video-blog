@@ -42,12 +42,12 @@ function attach_categories(array $posts): array
 function list_posts(int $page, int $perPage, array $opt = []): array
 {
     $page = min(max(1, $page), 1000000);           // keeps OFFSET an integer (an overflow became a float and broke the SQL)
+    $perPage = max(1, $perPage);
     $offset = ($page - 1) * $perPage;
     $where = [LIVE];
     $params = [];
     $join = '';
     $order = 'COALESCE(p.published_at, p.created_at) DESC, p.id DESC';
-    $scoreSel = '';
 
     if (!empty($opt['category_id'])) {
         $join .= ' JOIN post_category pcf ON pcf.post_id = p.id AND pcf.category_id = ?';
@@ -68,6 +68,10 @@ function list_posts(int $page, int $perPage, array $opt = []): array
     // Fulltext hits that match nothing (stopwords etc.) fall back to LIKE once.
     if ($total === 0 && isset($opt['search']) && empty($opt['_force_like']) && $useFt) {
         return list_posts($page, $perPage, $opt + ['_force_like' => true]);
+    }
+
+    if ($offset >= $total) {
+        return [[], $total];
     }
 
     $stmt = db()->prepare(
@@ -124,7 +128,7 @@ function get_post(int $id): ?array
 function related_posts(int $exceptId, int $limit = 3): array
 {
     $stmt = db()->prepare(
-        'SELECT p.* FROM posts p WHERE ' . LIVE . " AND p.id <> ? ORDER BY COALESCE(p.published_at, p.created_at) DESC LIMIT $limit"
+        'SELECT p.* FROM posts p WHERE ' . LIVE . " AND p.id <> ? ORDER BY COALESCE(p.published_at, p.created_at) DESC, p.id DESC LIMIT $limit"
     );
     $stmt->execute([$exceptId]);
     return attach_categories($stmt->fetchAll());
@@ -168,8 +172,9 @@ function get_nav_pages(): array
     if ($cache === null) {
         try {
             $cache = db()->query(
-                "SELECT title, slug FROM pages WHERE status = 'published' AND show_in_nav = 1 ORDER BY sort_order, title"
+                "SELECT title, slug, sort_order FROM pages WHERE status = 'published' AND show_in_nav = 1 ORDER BY sort_order, id"
             )->fetchAll();
+            usort($cache, fn($a, $b) => ($a['sort_order'] <=> $b['sort_order']) ?: tr_compare($a['title'], $b['title']));
         } catch (Throwable $ex) {
             $cache = [];
         }
@@ -187,7 +192,7 @@ function get_nav_pages(): array
 function save_post(array $data, ?int $id = null): int
 {
     $title = trim($data['title']);
-    $slug = unique_slug('posts', slugify($data['slug'] ?? '') ?: slugify($title), $id, 'video');
+    $slug = unique_slug('posts', requested_slug($data['slug'] ?? '', $title), $id, 'video');
     $body = (string)($data['body'] ?? '');
     $status = ($data['status'] ?? 'draft') === 'published' ? 'published' : 'draft';
     $publishedAt = $data['published_at'] ?? null;
@@ -232,10 +237,31 @@ function autopost_ensure_schema(): void
 {
     db()->exec(
         'CREATE TABLE IF NOT EXISTS autopost_seen (
-            youtube_id VARCHAR(20) NOT NULL PRIMARY KEY,
+            youtube_id VARCHAR(20) COLLATE utf8mb4_bin NOT NULL PRIMARY KEY,
             seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
     );
+}
+
+/** Upgrade case-insensitive IDs on older installs before an operation writes video data. */
+function ensure_video_id_collations(): void
+{
+    $legacyTables = db()->query(
+        "SELECT TABLE_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'youtube_id'
+           AND TABLE_NAME IN ('posts', 'autopost_seen', 'import_queue')
+           AND COLLATION_NAME <> 'utf8mb4_bin'"
+    )->fetchAll(PDO::FETCH_COLUMN);
+    foreach ($legacyTables as $table) {
+        db()->exec("ALTER TABLE `$table` MODIFY youtube_id VARCHAR(20) COLLATE utf8mb4_bin NOT NULL");
+    }
+}
+
+function post_exists_for_video(string $id): bool
+{
+    $stmt = db()->prepare('SELECT 1 FROM posts WHERE youtube_id = ?');
+    $stmt->execute([$id]);
+    return (bool)$stmt->fetchColumn();
 }
 
 /**
@@ -244,7 +270,6 @@ function autopost_ensure_schema(): void
  */
 function mark_video_seen(string $youtubeId): void
 {
-    autopost_ensure_schema();
     db()->prepare('INSERT IGNORE INTO autopost_seen (youtube_id) VALUES (?)')->execute([$youtubeId]);
 }
 
@@ -252,7 +277,7 @@ function sync_post_categories(int $postId, array $categoryIds): void
 {
     $pdo = db();
     $pdo->prepare('DELETE FROM post_category WHERE post_id = ?')->execute([$postId]);
-    $ins = $pdo->prepare('INSERT IGNORE INTO post_category (post_id, category_id) VALUES (?, ?)');
+    $ins = $pdo->prepare('INSERT INTO post_category (post_id, category_id) SELECT ?, id FROM categories WHERE id = ?');
     foreach (array_unique($categoryIds) as $cid) {
         if ($cid > 0) {
             $ins->execute([$postId, $cid]);
@@ -276,7 +301,7 @@ function save_category(string $name, ?int $id = null): int
 function save_page(array $data, ?int $id = null): int
 {
     $title = trim($data['title']);
-    $slug = unique_slug('pages', slugify($data['slug'] ?? '') ?: slugify($title), $id, 'sayfa');
+    $slug = unique_slug('pages', requested_slug($data['slug'] ?? '', $title), $id, 'sayfa');
     $vals = [
         $title,
         $slug,

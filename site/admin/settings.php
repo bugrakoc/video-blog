@@ -13,12 +13,11 @@ $form = [];
 foreach ($keys as $k) {
     $form[$k] = setting($k, $defaults[$k] ?? '');
 }
-$oldChannel = $form['channel_id'];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     foreach ($keys as $k) {
-        $form[$k] = trim((string)($_POST[$k] ?? ''));
+        $form[$k] = trim(form_text($_POST, $k));
     }
     if ($form['site_name'] === '' || mb_strlen($form['site_name']) > 100) {
         $errors[] = 'Site adı gerekli (en fazla 100 karakter).';
@@ -35,7 +34,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!in_array($form['autopost_shorts'], ['include', 'skip'], true)) {
         $form['autopost_shorts'] = 'include';
     }
-    if ($form['default_og_image'] !== '' && !preg_match('#^https?://#i', $form['default_og_image'])) {
+    if ($form['default_og_image'] !== '' && (strlen($form['default_og_image']) > 2048
+        || !filter_var($form['default_og_image'], FILTER_VALIDATE_URL) || !preg_match('#^https?://#i', $form['default_og_image']))) {
         $errors[] = 'Varsayılan paylaşım görseli http(s):// ile başlayan bir adres olmalı.';
     }
     $form['twitter_handle'] = ltrim($form['twitter_handle'], '@');
@@ -47,13 +47,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (!$errors) {
-        foreach ($keys as $k) {
-            set_setting($k, $form[$k]);
-        }
-        if ($form['channel_id'] !== $oldChannel) {
-            // A different channel starts from a fresh baseline so its back catalogue isn't imported.
-            set_setting('autopost_baseline', '');
-        }
+        admin_content_lock('admin/settings.php');
+        settings_all(true);
+        $oldChannel = setting('channel_id');
+        db_transaction(function () use ($keys, $form, $oldChannel): void {
+            foreach ($keys as $k) {
+                set_setting($k, $form[$k]);
+            }
+            if ($form['channel_id'] !== $oldChannel) {
+                foreach (['autopost_baseline', 'autopost_last_run', 'autopost_last_ok', 'autopost_last_result'] as $key) {
+                    set_setting($key, '');
+                }
+            }
+        });
+        site_unlock(CONTENT_LOCK);
         flash('ok', 'Ayarlar kaydedildi.');
         redirect(url('admin/settings.php'));
     }
@@ -108,7 +115,7 @@ admin_header('Ayarlar', 'settings');
     <label>YouTube Shorts
       <select name="autopost_shorts">
         <option value="include" <?= $form['autopost_shorts'] === 'include' ? 'selected' : '' ?>>Shorts videolarını da ekle</option>
-        <option value="skip" <?= $form['autopost_shorts'] === 'skip' ? 'selected' : '' ?>>Shorts videolarını atla</option>
+        <option value="skip" <?= $form['autopost_shorts'] === 'skip' ? 'selected' : '' ?>>Beslemede Shorts olarak belirtilen videoları atla</option>
       </select>
     </label>
   </fieldset>
@@ -153,7 +160,7 @@ $cronPath = realpath(ROOT_PATH . '/cron/autopost.php') ?: (ROOT_PATH . '/cron/au
 
   <h2>Zamanlanmış görev (cron)</h2>
   <p class="hint">DirectAdmin → Gelişmiş Özellikler → Cron İşleri bölümünde yeni görev ekleyin: her 30 dakikada bir (dakika: <code>*/30</code>, diğer alanlar <code>*</code>) ve komut olarak:</p>
-  <pre class="cmd">php <?= e($cronPath) ?></pre>
+  <pre class="cmd">php <?= e(escapeshellarg($cronPath)) ?></pre>
   <p class="hint">“php” yerine sunucunuzun PHP yolu gerekebilir (ör. <code>/usr/local/php82/bin/php</code>; DirectAdmin PHP Sürüm Seçici sayfasında görünür). Betik yalnızca yeni video eklediğinde veya hata olduğunda çıktı verir, bu yüzden her çalışmada e-posta gelmez.</p>
 </section>
 <?php admin_footer();

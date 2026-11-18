@@ -14,7 +14,7 @@ admin_boot();
 function collect_uploads(): array
 {
     $f = $_FILES['files'] ?? null;
-    if (!$f) {
+    if (!is_array($f)) {
         throw new RuntimeException('Dosya seçilmedi.');
     }
     $names = (array)$f['name'];
@@ -22,7 +22,10 @@ function collect_uploads(): array
     $errs = (array)$f['error'];
     $out = [];
     foreach ($names as $i => $name) {
-        $err = (int)$errs[$i];
+        if (!is_string($name) || !is_string($tmps[$i] ?? null) || !is_int($errs[$i] ?? null)) {
+            throw new RuntimeException('Yükleme bilgileri geçersiz.');
+        }
+        $err = $errs[$i];
         if ($err === UPLOAD_ERR_NO_FILE) {
             continue;
         }
@@ -48,103 +51,131 @@ function collect_uploads(): array
 $channel = setting('channel_id');
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // A body over post_max_size arrives empty (no CSRF token either), so say what happened instead of "invalid token".
-    if (!$_POST && !$_FILES && (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
-        $lim = upload_limit_bytes();
-        flash('error', 'Yüklenen dosya sunucunun sınırını aşıyor' . ($lim ? ' (en fazla ' . round($lim / 1048576, 1) . ' MB)' : '')
-            . '. Takeout’ta yalnızca “video meta verileri”ni seçin; videoların kendisi gerekmez.');
+    $length = (int)($_SERVER['CONTENT_LENGTH'] ?? 0);
+    if (!$_POST && !$_FILES && $length > 0 && str_starts_with($_SERVER['CONTENT_TYPE'] ?? '', 'multipart/form-data')) {
+        flash('error', 'Yükleme okunamadı. Dosyanın sunucunun boyut sınırını aşmadığını kontrol edin.');
         redirect(url('admin/import.php'));
     }
     csrf_check();
-    $action = (string)($_POST['action'] ?? '');
+    $action = form_text($_POST, 'action');
+    $back = $action === 'upload' ? 'admin/import.php' : 'admin/import-file.php';
 
-    if ($action === 'upload') {
-        try {
+    try {
+        if ($action === 'upload') {
             $result = import_file_analyze(collect_uploads(), $channel);
-            import_queue_replace($result['videos']);
-        } catch (RuntimeException $e) {
-            flash('error', $e->getMessage());
-            redirect(url('admin/import.php'));
         }
-        unset($_SESSION['import_file']);
-        $_SESSION['import_file_report'] = $result['report'];
-        redirect(url('admin/import-file.php'));
+    } catch (RuntimeException $e) {
+        flash('error', $e->getMessage());
+        redirect(url($back));
     }
 
+    admin_content_lock($back);
+    try {
+        settings_all(true);
+        $currentChannel = setting('channel_id');
+        import_ensure_schema();
+        ensure_video_id_collations();
+        $job = import_file_job($currentChannel);
+        $back = handle_import_file_action($action, $job, $currentChannel, $channel, $result ?? null);
+    } catch (Throwable $e) {
+        error_log('import-file: ' . $e->getMessage());
+        flash('error', 'İçe aktarma durdu. Tekrar deneyin veya sunucunun hata günlüğünü kontrol edin.');
+    } finally {
+        site_unlock(CONTENT_LOCK);
+    }
+    redirect(url($back));
+}
+
+function handle_import_file_action(string $action, ?array $job, string $channel, string $uploadChannel, ?array $result): string
+{
+    if ($action === 'upload') {
+        if ($channel !== $uploadChannel) {
+            flash('error', 'Kanal ayarlarda değişti. Dosyayı yeniden yükleyin.');
+            return 'admin/import.php';
+        }
+        if ($job !== null) {
+            flash('error', 'Önce mevcut içe aktarmayı tamamlayın veya iptal edin.');
+            return 'admin/import-file.php';
+        }
+        import_queue_replace($result['videos'], [
+            'id' => bin2hex(random_bytes(16)), 'channel' => $channel, 'report' => $result['report'], 'run' => null,
+        ]);
+        return 'admin/import-file.php';
+    }
+
+    if ($job === null || form_text($_POST, 'job') !== $job['id']) {
+        flash('error', 'İçe aktarma değişti. Güncel durumu kontrol edin.');
+        return 'admin/import-file.php';
+    }
     if ($action === 'cancel') {
         import_queue_clear();
-        unset($_SESSION['import_file'], $_SESSION['import_file_report']);
         flash('ok', 'İçe aktarma iptal edildi. Şimdiye kadar eklenen videolar sitede duruyor.');
-        redirect(url('admin/import.php'));
+        return 'admin/import.php';
+    }
+    if ($job['channel'] !== $channel) {
+        flash('error', 'Kanal ayarlarda değişti. Bu içe aktarmayı iptal edip dosyayı yeniden yükleyin.');
+        return 'admin/import.php';
     }
 
-    if ($action === 'start') {
-        $stats = import_queue_stats();
-        if ($stats['total'] === 0) {
-            flash('error', 'İçe aktarılacak video kalmadı. Dosyayı yeniden yükleyin.');
-            redirect(url('admin/import.php'));
-        }
-        $skippedUnlisted = 0;
-        if (empty($_POST['include_unlisted'])) {
-            $del = db()->prepare("DELETE FROM import_queue WHERE privacy = 'unlisted'");
-            $del->execute();
-            $skippedUnlisted = $del->rowCount();
-        }
-        $total = import_queue_stats()['total'];
-        $_SESSION['import_file'] = import_file_new_state((string)($_POST['mode'] ?? 'draft'), $total, $skippedUnlisted);
+    if ($action === 'start' && $job['run'] === null) {
+        $job = db_transaction(function () use ($job): array {
+            $skipped = ($_POST['include_unlisted'] ?? null) !== '1'
+                ? db()->exec("DELETE FROM import_queue WHERE privacy = 'unlisted'") : 0;
+            $job['run'] = import_file_new_state(form_text($_POST, 'mode'), import_queue_stats()['total'], $skipped);
+            import_file_store_job($job);
+            return $job;
+        });
         $action = 'continue';
     }
 
-    if ($action === 'continue' && !empty($_SESSION['import_file'])) {
-        $budget = (float)(config('import_time_budget') ?? 20);
-        $maxExec = (int)ini_get('max_execution_time');
-        if ($maxExec > 0) {
-            $budget = min($budget, $maxExec * 0.5);
-        }
-        $state = &$_SESSION['import_file'];
-        try {
-            $done = import_file_run($state, $budget);
-        } catch (Throwable $e) {
-            error_log('import-file: ' . $e->getMessage());
-            $state['error'] = 'Beklenmeyen hata: ' . $e->getMessage();
-            $done = false;
-        }
-        if ($done) {
-            $draft = $state['mode'] !== 'publish';
-            $msg = 'Tamamlandı: ' . $state['imported'] . ' video eklendi (' . ($draft ? 'taslak olarak' : 'yayında') . ')';
-            if ($state['existing'] > 0) {
-                $msg .= ', ' . $state['existing'] . ' video zaten sitedeydi';
-            }
-            if ($state['skipped_unlisted'] > 0) {
-                $msg .= ', ' . $state['skipped_unlisted'] . ' liste dışı video eklenmedi';
-            }
-            $msg .= '.';
-            if ($draft) {
-                $msg .= ' İnceleyip yayınlayabilirsiniz.';
-            }
-            if (setting('autopost_baseline') !== '1' && $channel !== '') {
-                $msg .= ' Dosya oluşturulduktan sonra yüklediğiniz videolar varsa, Ayarlar’daki “Son videoları içe aktar” düğmesini bir kez kullanın.';
-            }
-            unset($state, $_SESSION['import_file'], $_SESSION['import_file_report']);
-            import_queue_clear();
-            flash('ok', $msg);
-            redirect(url($draft ? 'admin/posts.php?status=draft' : 'admin/posts.php'));
-        }
-        if ($state['error']) {
-            flash('error', $state['error']);
-        }
-        unset($state);
+    if ($action !== 'continue' || $job['run'] === null) {
+        return 'admin/import-file.php';
     }
-    redirect(url('admin/import-file.php'));
+
+    $budget = (float)(config('import_time_budget') ?? 20);
+    $maxExec = (int)ini_get('max_execution_time');
+    if ($maxExec > 0) {
+        $budget = min($budget, $maxExec * 0.5);
+    }
+    try {
+        if (!import_file_run($job, $budget)) {
+            return 'admin/import-file.php';
+        }
+    } catch (Throwable $e) {
+        $job['run']['error'] = 'İçe aktarma durdu. Tekrar deneyin veya sunucunun hata günlüğünü kontrol edin.';
+        import_file_store_job($job);
+        throw $e;
+    }
+
+    $state = $job['run'];
+    $draft = $state['mode'] !== 'publish';
+    $msg = 'Tamamlandı: ' . $state['imported'] . ' video eklendi (' . ($draft ? 'taslak olarak' : 'yayında') . ')';
+    if ($state['existing'] > 0) {
+        $msg .= ', ' . $state['existing'] . ' video zaten sitedeydi';
+    }
+    if ($state['skipped_unlisted'] > 0) {
+        $msg .= ', ' . $state['skipped_unlisted'] . ' liste dışı video eklenmedi';
+    }
+    $msg .= '.';
+    if ($draft && $state['imported'] > 0) {
+        $msg .= ' İnceleyip yayınlayabilirsiniz.';
+    }
+    if (setting('autopost_baseline') !== '1' && $channel !== '') {
+        $msg .= ' Dosya oluşturulduktan sonra yüklediğiniz videolar varsa, Ayarlar’daki “Son videoları içe aktar” düğmesini bir kez kullanın.';
+    }
+    import_queue_clear();
+    flash('ok', $msg);
+    return $draft ? 'admin/posts.php?status=draft' : 'admin/posts.php';
 }
 
+import_ensure_schema();
+$job = import_file_job($channel);
+if ($job === null) {
+    redirect(url('admin/import.php'));
+}
 $stats = import_queue_stats();
-$run = $_SESSION['import_file'] ?? null;
-$report = $_SESSION['import_file_report'] ?? null;
-
-if ($stats['total'] === 0 && !$run) {
-    redirect(url('admin/import.php'));       // nothing staged
-}
+$run = $job['run'];
+$report = $job['report'];
 
 admin_header('Dosyadan içe aktar', 'settings');
 ?>
@@ -153,7 +184,13 @@ admin_header('Dosyadan içe aktar', 'settings');
   <a class="btn" href="import.php">← İçe aktarma yöntemleri</a>
 </div>
 
-<?php if ($run): ?>
+<?php if ($job['channel'] !== $channel): ?>
+  <div class="flash error">Kanal ayarlarda değişti. Bu içe aktarmayı iptal edip dosyayı yeniden yükleyin.</div>
+  <form method="post">
+    <?= csrf_field() ?><input type="hidden" name="job" value="<?= e($job['id']) ?>">
+    <button class="btn" name="action" value="cancel">İptal</button>
+  </form>
+<?php elseif ($run): ?>
   <?php $left = $stats['total']; $doneN = max(0, $run['total'] - $left); ?>
   <section class="editor narrow">
     <h2>İçe aktarma sürüyor</h2>
@@ -165,11 +202,11 @@ admin_header('Dosyadan içe aktar', 'settings');
     <progress max="<?= (int)max(1, $run['total']) ?>" value="<?= (int)$doneN ?>" style="width:100%"></progress>
     <div class="row-actions">
       <form method="post"<?= $run['error'] ? '' : ' data-autosubmit="800"' ?> class="inline">
-        <?= csrf_field() ?><input type="hidden" name="action" value="continue">
+        <?= csrf_field() ?><input type="hidden" name="job" value="<?= e($job['id']) ?>"><input type="hidden" name="action" value="continue">
         <button class="btn primary"><?= $run['error'] ? 'Tekrar dene / Devam et' : 'Devam ediliyor… (bekleyin)' ?></button>
       </form>
       <form method="post" class="inline" data-confirm="İçe aktarma iptal edilsin mi? Eklenen videolar silinmez.">
-        <?= csrf_field() ?><input type="hidden" name="action" value="cancel">
+        <?= csrf_field() ?><input type="hidden" name="job" value="<?= e($job['id']) ?>"><input type="hidden" name="action" value="cancel">
         <button class="btn">İptal</button>
       </form>
     </div>
@@ -232,7 +269,7 @@ admin_header('Dosyadan içe aktar', 'settings');
     </table>
 
     <form method="post" autocomplete="off">
-      <?= csrf_field() ?><input type="hidden" name="action" value="start">
+      <?= csrf_field() ?><input type="hidden" name="job" value="<?= e($job['id']) ?>"><input type="hidden" name="action" value="start">
       <fieldset style="margin-top:20px">
         <legend>İçe aktar</legend>
         <label>Eklenen videolar
@@ -250,7 +287,7 @@ admin_header('Dosyadan içe aktar', 'settings');
       </fieldset>
     </form>
     <form method="post" data-confirm="Vazgeçilsin mi? Yüklenen dosya silinir, sitede bir şey değişmez.">
-      <?= csrf_field() ?><input type="hidden" name="action" value="cancel">
+      <?= csrf_field() ?><input type="hidden" name="job" value="<?= e($job['id']) ?>"><input type="hidden" name="action" value="cancel">
       <button class="link">Vazgeç</button>
     </form>
   </section>

@@ -12,7 +12,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 csrf_check();
 
-$action = (string)($_POST['action'] ?? '');
+$action = form_text($_POST, 'action');
 if (!in_array($action, ['run', 'import_all'], true)) {
     flash('error', 'Geçersiz işlem.');
     redirect(url('admin/settings.php'));
@@ -27,6 +27,6 @@ try {
     flash($r['ok'] ? 'ok' : 'error', $msg);
 } catch (Throwable $e) {
     error_log('autopost (admin): ' . $e->getMessage());
-    flash('error', 'Kontrol sırasında bir hata oluştu: ' . $e->getMessage());
+    flash('error', 'Kontrol sırasında bir hata oluştu. Ayrıntılar sunucunun hata günlüğünde.');
 }
 redirect(url('admin/settings.php'));

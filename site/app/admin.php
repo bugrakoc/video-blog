@@ -20,33 +20,25 @@ function admin_boot(bool $requireLogin = true): void
 
     start_session();
     if (!empty($_SESSION['admin_id'])) {
-        $now = time();
-        $expired = $now - (int)($_SESSION['last_seen'] ?? $now) > ADMIN_IDLE_SECONDS;
-        $revoked = !$expired && !admin_session_matches_password();
-        if ($expired || $revoked) {
-            session_unset();
-            session_destroy();
-            start_session();
-            session_regenerate_id(true);
-            flash('error', $expired
+        $problem = admin_session_problem();
+        if ($problem !== null) {
+            reset_admin_session();
+            flash('error', $problem === 'expired'
                 ? 'Oturum süresi doldu. Lütfen tekrar giriş yapın.'
                 : 'Şifre değiştirildiği için oturum kapatıldı. Lütfen tekrar giriş yapın.');
         } else {
-            $_SESSION['last_seen'] = $now;
+            $_SESSION['last_seen'] = time();
         }
     }
-    if ($requireLogin) {
+    if ($requireLogin && !is_admin()) {
+        if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+            csrf_check();
+        }
         require_admin();
     }
 }
 
 /* ---------- Session ↔ password binding ---------- */
-
-/** Value stored in the session at login. Changing the password changes it, which ends every other session. */
-function admin_password_fingerprint(string $passwordHash): string
-{
-    return hash('sha256', 'vb-session|' . $passwordHash);
-}
 
 /** Mark the current session as logged in as $adminId (whose current hash is $passwordHash). */
 function admin_session_login(int $adminId, string $passwordHash): void
@@ -58,14 +50,17 @@ function admin_session_login(int $adminId, string $passwordHash): void
     $_SESSION['last_seen'] = time();
 }
 
-/** False when the account is gone or its password changed after this session logged in. */
-function admin_session_matches_password(): bool
+function reset_admin_session(): void
 {
-    $stmt = db()->prepare('SELECT password_hash FROM admins WHERE id = ?');
-    $stmt->execute([(int)$_SESSION['admin_id']]);
-    $hash = $stmt->fetchColumn();
-    return is_string($hash)
-        && hash_equals(admin_password_fingerprint($hash), (string)($_SESSION['admin_pw'] ?? ''));
+    $_SESSION = [];
+    session_regenerate_id(true);
+}
+
+function replace_admin_password(int $id, string $oldHash, string $newHash): bool
+{
+    $stmt = db()->prepare('UPDATE admins SET password_hash = ? WHERE id = ? AND BINARY password_hash = ?');
+    $stmt->execute([$newHash, $id, $oldHash]);
+    return $stmt->rowCount() === 1;
 }
 
 /* ---------- Flash messages ---------- */
@@ -95,23 +90,27 @@ function login_recent_failures(string $ip): int
     return (int)$stmt->fetchColumn();
 }
 
-/**
- * Reserve one password attempt for $ip. Returns false when the IP is over the limit.
- * The attempt is recorded BEFORE the password is checked and counted afterwards, so a burst of parallel
- * requests can't all pass the check before any failure is stored. A successful login clears the record.
- */
+/** Reserve one attempt before verifying the password, including simultaneous requests from the same IP. */
 function login_attempt_allowed(string $ip): bool
 {
-    db()->exec('DELETE FROM login_attempts WHERE attempted_at < (NOW() - INTERVAL 1 DAY)');
-    if (login_recent_failures($ip) >= LOGIN_MAX_ATTEMPTS) {
+    $lock = 'login:' . $ip;
+    if (!site_lock($lock, 2)) {
         return false;
     }
-    login_record_failure($ip);
-    return login_recent_failures($ip) <= LOGIN_MAX_ATTEMPTS;
+    try {
+        if (login_recent_failures($ip) >= LOGIN_MAX_ATTEMPTS) {
+            return false;
+        }
+        login_record_failure($ip);
+        return true;
+    } finally {
+        site_unlock($lock);
+    }
 }
 
 function login_record_failure(string $ip): void
 {
+    db()->exec('DELETE FROM login_attempts WHERE attempted_at < (NOW() - INTERVAL 1 DAY)');
     db()->prepare('INSERT INTO login_attempts (ip) VALUES (?)')->execute([$ip]);
 }
 
@@ -132,6 +131,15 @@ function login_dummy_hash(): string
         set_setting('login_dummy_hash', $h);
     }
     return $h;
+}
+
+/** Serialize admin content mutations with cron and imports. The caller releases this lock. */
+function admin_content_lock(string $back): void
+{
+    if (!site_lock(CONTENT_LOCK, 2)) {
+        flash('error', 'Başka bir içerik işlemi çalışıyor. Biraz sonra tekrar deneyin.');
+        redirect(url($back));
+    }
 }
 
 /* ---------- Layout ---------- */
@@ -225,7 +233,7 @@ function admin_list_posts(int $page, string $status, string $q): array
     } elseif ($status === 'draft') {
         $where[] = "status = 'draft'";
     }
-    foreach (array_slice(array_filter(preg_split('/[^a-z0-9]+/', fold($q))), 0, 8) as $t) {
+    foreach (array_slice(array_filter(preg_split('/[^a-z0-9]+/', fold($q)), fn($t) => $t !== ''), 0, 8) as $t) {
         $where[] = 'search_text LIKE ?';
         $params[] = '%' . addcslashes($t, '%_\\') . '%';
     }
@@ -247,16 +255,21 @@ function admin_list_posts(int $page, string $status, string $q): array
 function parse_local_datetime(string $v): ?string
 {
     $v = trim($v);
-    if ($v === '') {
+    if ($v === '' || str_contains($v, "\0")) {
         return null;
     }
-    $ts = strtotime($v);
-    return $ts === false ? null : date('Y-m-d H:i:s', $ts);
+    foreach (['Y-m-d\TH:i:s', 'Y-m-d\TH:i'] as $format) {
+        $dt = DateTimeImmutable::createFromFormat('!' . $format, $v);
+        if ($dt && $dt->format($format) === $v && (int)$dt->format('Y') >= 1000) {
+            return $dt->format('Y-m-d H:i:s');
+        }
+    }
+    return null;
 }
 
 function to_local_datetime(?string $db): string
 {
-    return $db ? date('Y-m-d\TH:i', strtotime($db)) : '';
+    return $db ? str_replace(' ', 'T', $db) : '';
 }
 
 /** Simple prev/next pager for admin lists. $link receives a page number and returns a URL. */
