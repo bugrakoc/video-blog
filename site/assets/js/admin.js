@@ -17,6 +17,26 @@
     auto.requestSubmit();
   }, parseInt(auto.getAttribute('data-autosubmit'), 10) || 800);
 
+  // Without JavaScript the owner can enter the selected count next to the Takeout picker.
+  var files = document.querySelector('input[type="file"][multiple]');
+  var count = files && files.form.elements.namedItem('file_count');
+  if (count) {
+    var limit = Number(count.max);
+    count.type = 'hidden';
+    count.closest('label').replaceWith(count);
+    function updateFileCount() {
+      var selected = files.files.length;
+      count.value = String(selected);
+      files.setCustomValidity(selected > limit ? 'Bir seferde en fazla ' + limit + ' dosya yüklenebilir.' : '');
+    }
+    files.addEventListener('change', updateFileCount);
+    files.form.addEventListener('submit', function (event) {
+      updateFileCount();
+      if (!files.reportValidity()) event.preventDefault();
+    });
+    updateFileCount();
+  }
+
   // Video editor: thumbnail preview + fetch the title from YouTube.
   var urlInput = document.getElementById('youtube_url');
   if (!urlInput) return;

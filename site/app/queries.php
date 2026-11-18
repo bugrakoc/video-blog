@@ -29,7 +29,7 @@ function attach_categories(array $posts): array
     }
     foreach ($posts as &$p) {
         $cats = $map[$p['id']] ?? [];
-        usort($cats, fn($a, $b) => tr_compare($a['name'], $b['name']));
+        usort($cats, fn($a, $b) => tr_compare($a['name'], $b['name']) ?: $a['id'] <=> $b['id']);
         $p['categories'] = $cats;
     }
     return $posts;

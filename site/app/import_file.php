@@ -59,9 +59,20 @@ function import_file_job(string $channel): ?array
     if (is_string($raw) && $raw !== '') {
         return json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
     }
-    // A pre-upgrade queue can still be previewed and confirmed.
+    // Keep pre-upgrade queues visible so the owner can review or cancel them.
     if (db()->query('SELECT 1 FROM import_queue LIMIT 1')->fetchColumn()) {
         return ['id' => 'legacy-' . hash('sha256', $channel), 'channel' => $channel, 'report' => null, 'run' => null];
+    }
+    return null;
+}
+
+function import_file_channel_error(array $job, string $channel): ?string
+{
+    if ($job['channel'] !== $channel) {
+        return 'Kanal ayarlarda değişti. Bu içe aktarmayı iptal edip dosyayı yeniden yükleyin.';
+    }
+    if ($channel !== '' && empty($job['channel_verified'])) {
+        return 'Bu sıra eski sürümde oluşturuldu. Kanal kimliklerini doğrulamak için içe aktarmayı iptal edip dosyayı yeniden yükleyin. Daha önce eklenen videolar korunur.';
     }
     return null;
 }
@@ -102,6 +113,11 @@ function import_queue_sample(int $n = 5): array
 }
 
 /* ---------- Reading uploads ---------- */
+
+function upload_file_count_limit(): int
+{
+    return min(20, max(0, (int)ini_get('max_file_uploads')));
+}
 
 /** PHP's own upload limit in bytes (the smaller of upload_max_filesize and post_max_size). */
 function upload_limit_bytes(): int
@@ -612,7 +628,7 @@ function import_file_analyze(array $uploads, string $channel): array
     $dupes = 0;
     $excludedIds = [];
     $unlistedIds = [];
-    $skipped = ['private' => 0, 'state' => 0, 'live' => 0, 'other_channel' => 0];
+    $skipped = ['private' => 0, 'state' => 0, 'live' => 0, 'other_channel' => 0, 'missing_channel' => 0];
     $unknown = [];
     $invalid = [];
     $invalidCount = 0;
@@ -636,8 +652,9 @@ function import_file_analyze(array $uploads, string $channel): array
             if ($v['channel'] !== '') {
                 $channels[$v['channel']] = ($channels[$v['channel']] ?? 0) + 1;
             }
-            if ($channel !== '' && $v['channel'] !== '' && $v['channel'] !== $channel) {
-                $skipped['other_channel']++;
+            if ($channel !== '' && $v['channel'] !== $channel) {
+                $reason = $v['channel'] === '' ? 'missing_channel' : 'other_channel';
+                $skipped[$reason]++;
                 continue;
             }
             if (isset($videos[$v['id']])) {
@@ -649,7 +666,7 @@ function import_file_analyze(array $uploads, string $channel): array
     }
 
     // The channel check catches the classic mistake: an export or command run for the wrong channel/account.
-    if ($channel !== '' && $channels && !isset($channels[$channel])) {
+    if ($channel !== '' && $channels && !isset($channels[$channel]) && $skipped['missing_channel'] === 0) {
         $found = array_key_first($channels);
         throw new RuntimeException(
             'Dosyadaki videolar başka bir kanala ait (' . $found . '), ayarlardaki kanal ise ' . $channel . '. '
@@ -673,6 +690,12 @@ function import_file_analyze(array $uploads, string $channel): array
         }
         if ($unknown) {
             $why[] = array_sum($unknown) . ' gizliliği bilinmeyen';
+        }
+        if ($skipped['missing_channel'] > 0) {
+            $why[] = $skipped['missing_channel'] . ' kanal kimliği eksik';
+        }
+        if ($skipped['other_channel'] > 0) {
+            $why[] = $skipped['other_channel'] . ' başka kanala ait';
         }
         throw new RuntimeException('İçe aktarılabilecek video bulunamadı' . ($why ? ' (' . implode(', ', $why) . ' video atlandı)' : '') . '.');
     }
