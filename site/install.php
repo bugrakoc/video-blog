@@ -4,6 +4,9 @@ declare(strict_types=1);
 // One-time installer. Delete this file after running it.
 require __DIR__ . '/app/bootstrap.php';
 header('Content-Type: text/html; charset=utf-8');
+header('Cache-Control: no-store');
+header('X-Frame-Options: DENY');
+header('X-Robots-Tag: noindex, nofollow');
 start_session();
 
 $lock = APP_PATH . '/installed.lock';
@@ -34,21 +37,29 @@ if ($alreadyInstalled) {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
-    $user = trim((string)($_POST['username'] ?? ''));
-    $pass = (string)($_POST['password'] ?? '');
-    $site = trim((string)($_POST['site_name'] ?? '')) ?: 'Video Blog';
-    $sample = !empty($_POST['sample']);
+    $user = trim(form_text($_POST, 'username'));
+    $pass = is_string($_POST['password'] ?? null) ? $_POST['password'] : '';
+    $site = trim(form_text($_POST, 'site_name')) ?: 'Video Blog';
+    $sample = ($_POST['sample'] ?? null) === '1';
 
     if (!preg_match('/^[A-Za-z0-9_.-]{3,60}$/', $user)) {
         $errors[] = 'Kullanıcı adı 3-60 karakter olmalı (harf, rakam, . _ -).';
     }
-    if (mb_strlen($pass) < 10) {
-        $errors[] = 'Şifre en az 10 karakter olmalı.';
+    if (($error = new_password_error($pass)) !== null) {
+        $errors[] = $error;
+    }
+    if (mb_strlen($site) > 100) {
+        $errors[] = 'Site adı en fazla 100 karakter olabilir.';
     }
 
     if (!$errors) {
+        $locked = false;
         try {
             $pdo = db();
+            $locked = site_lock('install');
+            if (!$locked) {
+                throw new RuntimeException('Başka bir kurulum çalışıyor. Biraz sonra tekrar deneyin.');
+            }
             if (admin_account_exists()) {
                 throw new RuntimeException('Bu site zaten kurulmuş. install.php dosyasını silin.');
             }
@@ -69,47 +80,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $log[] = 'Bağlantı kodlaması: utf8mb4 ✓';
 
-            $probe = 'ÇĞİÖŞÜ çğıöşü İstanbul ığdır';
-            $pdo->prepare("INSERT INTO settings (`key`, `value`) VALUES ('_probe', ?) ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)")->execute([$probe]);
-            $back = $pdo->query("SELECT `value` FROM settings WHERE `key` = '_probe'")->fetchColumn();
-            $pdo->exec("DELETE FROM settings WHERE `key` = '_probe'");
-            if ($back !== $probe) {
-                throw new RuntimeException('Türkçe karakter gidiş-dönüş testi başarısız: ' . $back);
-            }
-            $log[] = 'Türkçe karakter testi (ÇĞİÖŞÜ çğıöşü) ✓';
+            db_transaction(function () use ($pdo, $user, $pass, $site, $sample, &$log): void {
+                $probe = 'ÇĞİÖŞÜ çğıöşü İstanbul ığdır';
+                $pdo->prepare("INSERT INTO settings (`key`, `value`) VALUES ('_probe', ?) ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)")->execute([$probe]);
+                $back = $pdo->query("SELECT `value` FROM settings WHERE `key` = '_probe'")->fetchColumn();
+                $pdo->exec("DELETE FROM settings WHERE `key` = '_probe'");
+                if ($back !== $probe) {
+                    throw new RuntimeException('Türkçe karakter gidiş-dönüş testi başarısız: ' . $back);
+                }
+                $log[] = 'Türkçe karakter testi (ÇĞİÖŞÜ çğıöşü) ✓';
 
-            // 3. Admin + settings
-            $pdo->prepare('INSERT INTO admins (username, password_hash) VALUES (?, ?)')
-                ->execute([$user, password_hash($pass, PASSWORD_DEFAULT)]);
-            set_setting('site_name', $site);
-            $log[] = 'Yönetici hesabı oluşturuldu.';
+                // 3. Admin + settings
+                $pdo->prepare('INSERT INTO admins (username, password_hash) VALUES (?, ?)')
+                    ->execute([$user, password_hash($pass, PASSWORD_DEFAULT)]);
+                set_setting('site_name', $site);
+                $log[] = 'Yönetici hesabı oluşturuldu.';
 
-            // 4. Sample content
-            if ($sample) {
-                $c1 = save_category('Eğitim');
-                $c2 = save_category('Çay Sohbetleri');
-                save_post([
-                    'title' => 'Türkçe karakter testi: ÇĞİÖŞÜ çğıöşü İstanbul ığdır',
-                    'body' => "Bu bir **deneme** yazısıdır. Şöyle bir açıklama: çiğ köfte, ığdır'ın gölü, İstanbul'un ışıkları.\n\nDaha fazla bilgi için [YouTube](https://www.youtube.com) sayfasına bakın.",
-                    'youtube_id' => 'dQw4w9WgXcQ',
-                    'status' => 'published',
-                    'category_ids' => [$c1, $c2],
-                ]);
-                save_post([
-                    'title' => 'Örnek video: Şu ünlü ilk video',
-                    'body' => "İkinci örnek yazı. Arama testi için: **araba**, arabalar, çay, Çay, ÇAY.",
-                    'youtube_id' => 'jNQXAC9IVRw',
-                    'status' => 'published',
-                    'category_ids' => [$c1],
-                ]);
-                save_page([
-                    'title' => 'Hakkında',
-                    'body' => "## Merhaba!\n\nBu sayfa örnek bir statik sayfadır. Yönetim panelinden düzenleyebilirsiniz.",
-                    'show_in_nav' => 1,
-                    'sort_order' => 1,
-                ]);
-                $log[] = 'Örnek içerik eklendi.';
-            }
+                // 4. Sample content
+                if ($sample) {
+                    $c1 = save_category('Eğitim');
+                    $c2 = save_category('Çay Sohbetleri');
+                    save_post([
+                        'title' => 'Türkçe karakter testi: ÇĞİÖŞÜ çğıöşü İstanbul ığdır',
+                        'body' => "Bu bir **deneme** yazısıdır. Şöyle bir açıklama: çiğ köfte, ığdır'ın gölü, İstanbul'un ışıkları.\n\nDaha fazla bilgi için [YouTube](https://www.youtube.com) sayfasına bakın.",
+                        'youtube_id' => 'dQw4w9WgXcQ',
+                        'status' => 'published',
+                        'category_ids' => [$c1, $c2],
+                    ]);
+                    save_post([
+                        'title' => 'Örnek video: Şu ünlü ilk video',
+                        'body' => "İkinci örnek yazı. Arama testi için: **araba**, arabalar, çay, Çay, ÇAY.",
+                        'youtube_id' => 'jNQXAC9IVRw',
+                        'status' => 'published',
+                        'category_ids' => [$c1],
+                    ]);
+                    save_page([
+                        'title' => 'Hakkında',
+                        'body' => "## Merhaba!\n\nBu sayfa örnek bir statik sayfadır. Yönetim panelinden düzenleyebilirsiniz.",
+                        'show_in_nav' => 1,
+                        'sort_order' => 1,
+                    ]);
+                    $log[] = 'Örnek içerik eklendi.';
+                }
+            });
 
             if (@file_put_contents($lock, date('c')) === false) {
                 $log[] = 'Uyarı: app/installed.lock yazılamadı. Kurulum yine de tekrar çalıştırılamaz (yönetici hesabı var), ama install.php dosyasını mutlaka silin.';
@@ -123,6 +136,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                           . '(Ayrıntı sunucunun hata günlüğünde; sayfada görmek için config.php içinde debug değerini true yapın.)';
             } else {
                 $errors[] = 'Hata: ' . $ex->getMessage();
+            }
+        } finally {
+            if ($locked) {
+                site_unlock('install');
             }
         }
     }
@@ -151,8 +168,8 @@ button{margin-top:20px;padding:10px 20px;font:inherit;background:#c2410c;color:#
   <p>Önce <code>app/config.php</code> içine veritabanı bilgilerini yazın.</p>
   <form method="post">
     <?= csrf_field() ?>
-    <label>Site adı</label><input type="text" name="site_name" value="Video Blog">
-    <label>Yönetici kullanıcı adı</label><input type="text" name="username" required>
+    <label>Site adı</label><input type="text" name="site_name" maxlength="100" value="<?= e($site ?? 'Video Blog') ?>">
+    <label>Yönetici kullanıcı adı</label><input type="text" name="username" value="<?= e($user ?? '') ?>" required>
     <label>Yönetici şifresi (en az 10 karakter)</label><input type="password" name="password" required minlength="10">
     <label><input type="checkbox" name="sample" value="1" checked> Örnek içerik ekle (Türkçe karakter testi dahil)</label>
     <button>Kur</button>

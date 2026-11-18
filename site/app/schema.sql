@@ -1,5 +1,5 @@
 -- MariaDB 10.6, utf8mb4 everywhere
-SET NAMES utf8mb4;
+SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS admins (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS posts (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
     slug VARCHAR(190) NOT NULL UNIQUE,
-    youtube_id VARCHAR(20) NOT NULL UNIQUE,
+    youtube_id VARCHAR(20) COLLATE utf8mb4_bin NOT NULL UNIQUE,
     body MEDIUMTEXT NOT NULL,
     excerpt TEXT NULL,
     status ENUM('draft','published') NOT NULL DEFAULT 'draft',
@@ -68,13 +68,13 @@ CREATE TABLE IF NOT EXISTS settings (
 -- Videos the autoposter has already handled (so deleted posts are not re-imported).
 -- Also created on demand by app/autopost.php for installs made before this table existed.
 CREATE TABLE IF NOT EXISTS autopost_seen (
-    youtube_id VARCHAR(20) NOT NULL PRIMARY KEY,
+    youtube_id VARCHAR(20) COLLATE utf8mb4_bin NOT NULL PRIMARY KEY,
     seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Videos waiting to be imported from an uploaded Takeout / yt-dlp file (cleared when the import ends).
 CREATE TABLE IF NOT EXISTS import_queue (
-    youtube_id VARCHAR(20) NOT NULL PRIMARY KEY,
+    youtube_id VARCHAR(20) COLLATE utf8mb4_bin NOT NULL PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
     description MEDIUMTEXT NULL,
     published_at DATETIME NULL,

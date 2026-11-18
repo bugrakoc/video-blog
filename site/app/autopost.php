@@ -6,8 +6,6 @@ declare(strict_types=1);
  * No API key needed. Used by cron/autopost.php (cron) and admin/autopost.php (manual run).
  */
 
-const AUTOPOST_LOCK = 'videoblog_autopost';
-
 // autopost_ensure_schema() and mark_video_seen() live in queries.php, because the admin panel also needs them.
 
 function autopost_feed_url(string $channelId): string
@@ -49,8 +47,8 @@ function autopost_http_get(string $url): array
         return [(string)$body, null];
     }
     if (ini_get('allow_url_fopen')) {
-        $ctx = stream_context_create(['http' => ['timeout' => 20, 'user_agent' => 'VideoBlog/1.0', 'ignore_errors' => true]]);
-        $body = @file_get_contents($url, false, $ctx, 0, $maxBytes);
+        $ctx = stream_context_create(['http' => ['timeout' => 20, 'user_agent' => 'VideoBlog/1.0', 'ignore_errors' => true, 'follow_location' => 0]]);
+        $body = @file_get_contents($url, false, $ctx, 0, $maxBytes + 1);
         $status = 0;
         foreach ($http_response_header ?? [] as $h) {
             if (preg_match('#^HTTP/\S+\s+(\d{3})#', $h, $m)) {
@@ -60,28 +58,28 @@ function autopost_http_get(string $url): array
         if ($body === false || $status !== 200) {
             return [null, $status === 404 ? 'Kanal bulunamadı (404). Kanal kimliğini kontrol edin.' : 'YouTube kanalına ulaşılamadı.'];
         }
+        if (strlen($body) > $maxBytes) {
+            return [null, 'YouTube beslemesi çok büyük.'];
+        }
         return [$body, null];
     }
     return [null, 'Sunucuda curl veya allow_url_fopen etkin değil.'];
 }
 
-/**
- * Convert an ISO 8601 timestamp from YouTube to a DB datetime in the site's timezone.
- * Never returns a future time (clock skew would otherwise hide an imported video).
- */
+/** Read an absolute video timestamp, preserving its real date in the site's timezone. */
 function video_date_to_db(?string $iso): ?string
 {
     $iso = trim((string)$iso);
-    if ($iso === '') {
+    if (!preg_match('/^[1-9]\d{3}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}| UTC)?$/D', $iso)) {
         return null;
     }
     try {
-        $dt = new DateTime($iso);
-        if ($dt->getTimestamp() > time()) {
-            $dt = new DateTime('now');
+        $dt = new DateTimeImmutable($iso);
+        if (DateTimeImmutable::getLastErrors() !== false) {
+            return null;
         }
-        return $dt->setTimezone(new DateTimeZone((string)(config('timezone') ?: 'Europe/Istanbul')))->format('Y-m-d H:i:s');
-    } catch (Throwable $e) {
+        return $dt->setTimezone(new DateTimeZone(date_default_timezone_get()))->format('Y-m-d H:i:s');
+    } catch (Exception $e) {
         return null;
     }
 }
@@ -91,13 +89,16 @@ function video_date_to_db(?string $iso): ?string
  * [['id', 'title', 'published' (DB datetime|null), 'description', 'is_short'], ...]
  * Throws RuntimeException when the XML is unusable.
  */
-function autopost_parse_feed(string $xml): array
+function autopost_parse_feed(string $xml, string $channel = ''): array
 {
     $prev = libxml_use_internal_errors(true);
     $dom = new DOMDocument();
-    $loaded = $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOCDATA | LIBXML_NOERROR | LIBXML_NOWARNING);
-    libxml_clear_errors();
-    libxml_use_internal_errors($prev);
+    try {
+        $loaded = trim($xml) !== '' && $dom->loadXML($xml, LIBXML_NONET | LIBXML_NOCDATA | LIBXML_NOERROR | LIBXML_NOWARNING);
+    } finally {
+        libxml_clear_errors();
+        libxml_use_internal_errors($prev);
+    }
     if (!$loaded) {
         throw new RuntimeException('Beslemesi (feed) okunamadı: geçerli bir XML değil.');
     }
@@ -107,23 +108,33 @@ function autopost_parse_feed(string $xml): array
     $xp->registerNamespace('yt', 'http://www.youtube.com/xml/schemas/2015');
     $xp->registerNamespace('media', 'http://search.yahoo.com/mrss/');
 
+    if (!$xp->evaluate('boolean(/a:feed)') || $dom->doctype !== null) {
+        throw new RuntimeException('Yanıt, geçerli bir YouTube kanal beslemesi değil.');
+    }
+    if ($channel !== '' && $xp->evaluate('string(/a:feed/yt:channelId)') !== $channel) {
+        throw new RuntimeException('Beslemedeki kanal kimliği ayarlarla eşleşmiyor.');
+    }
+
     $out = [];
-    foreach ($xp->query('//a:entry') as $entry) {
+    foreach ($xp->query('/a:feed/a:entry') as $entry) {
         $id = trim((string)$xp->evaluate('string(yt:videoId)', $entry));
-        if (!preg_match('/^[A-Za-z0-9_-]{11}$/', $id)) {
-            continue;
+        $published = video_date_to_db($xp->evaluate('string(a:published)', $entry));
+        if (youtube_id($id) !== $id || $published === null) {
+            throw new RuntimeException('YouTube beslemesinde geçersiz bir video kaydı var.');
         }
         $title = trim((string)$xp->evaluate('string(a:title)', $entry));
         $desc = (string)$xp->evaluate('string(media:group/media:description)', $entry);
         $link = (string)$xp->evaluate('string(a:link[@rel="alternate"]/@href)', $entry);
-        $out[] = [
+        $out[$id] = [
             'id' => $id,
             'title' => mb_substr($title !== '' ? $title : 'Başlıksız video', 0, 255),
-            'published' => video_date_to_db(trim((string)$xp->evaluate('string(a:published)', $entry))),
+            'published' => $published,
             'description' => $desc,
             'is_short' => stripos($link, '/shorts/') !== false,
         ];
     }
+    $out = array_values($out);
+    usort($out, fn($a, $b) => strcmp($b['published'], $a['published']));
     return $out;
 }
 
@@ -139,41 +150,44 @@ function description_to_markdown(string $text): string
     return preg_replace("/\n{3,}/", "\n\n", $text);
 }
 
-/**
- * One description line as literal text, so Parsedown doesn't turn it into a heading ("#tag", or the line above
- * "-----" / "====="), list ("- ", "1986. "), quote, rule, code block (indentation, ```), table or link reference.
- * Characters Parsedown can backslash-escape get a backslash (readable in the editor); '=', '~' and ':' can't be
- * escaped that way, so those rare lines start with an HTML entity instead.
- */
+/** Escape Markdown punctuation while keeping HTTP(S) URLs clickable. */
 function description_line_to_markdown(string $line): string
 {
-    $line = ltrim(rtrim($line), " \t");          // indentation would make a code block; HTML collapses it anyway
-    if ($line === '') {
+    $parts = preg_split('~(https?://[^\s<>"\']+)~iu', trim($line), -1, PREG_SPLIT_DELIM_CAPTURE);
+    if ($parts === false) {
         return '';
     }
-    if (preg_match('/^=+$/', $line)) {
-        return '&#61;' . substr($line, 1);         // setext heading underline
+    foreach ($parts as $i => &$part) {
+        if ($i % 2 === 1) {
+            $link = rtrim($part, '.,;:!?');
+            foreach ([')' => '(', ']' => '[', '}' => '{'] as $close => $open) {
+                while (str_ends_with($link, $close) && substr_count($link, $close) > substr_count($link, $open)) {
+                    $link = substr($link, 0, -1);
+                }
+            }
+            $part = '<' . $link . '>' . substr($part, strlen($link));
+        } else {
+            $part = strtr($part, [
+                '&' => '&amp;', '<' => '&lt;', '>' => '&gt;', '\\' => '&#92;',
+                '#' => '\\#', '*' => '\\*', '_' => '\\_', '+' => '\\+', '-' => '\\-',
+                '[' => '\\[', ']' => '\\]', '`' => '\\`', '|' => '&#124;', '~' => '&#126;', '=' => '&#61;',
+            ]);
+            if ($i === 0) {
+                $part = preg_replace('/^(\d+)\./', '$1&#46;', $part);
+            }
+        }
     }
-    if (str_starts_with($line, '~~~')) {
-        return '&#126;' . substr($line, 1);        // fenced code
-    }
-    if (preg_match('/^:[-:| ]*-[-:| ]*$/', $line)) {
-        return '&#58;' . substr($line, 1);         // table alignment row
-    }
-    if (preg_match('/^\d+\./', $line)) {
-        return (string)preg_replace('/^(\d+)\./', '$1\\.', $line);   // ordered list
-    }
-    if (strpos('#>*+-_`|[', $line[0]) !== false) {
-        return '\\' . $line;                       // heading, quote, list, rule, code fence, table, reference
-    }
-    return $line;
+    unset($part);
+    return implode('', $parts);
 }
 
 function autopost_record(bool $ok, string $message): void
 {
-    set_setting('autopost_last_run', date('Y-m-d H:i:s'));
-    set_setting('autopost_last_ok', $ok ? '1' : '0');
-    set_setting('autopost_last_result', $message);
+    db_transaction(function () use ($ok, $message): void {
+        set_setting('autopost_last_run', date('Y-m-d H:i:s'));
+        set_setting('autopost_last_ok', $ok ? '1' : '0');
+        set_setting('autopost_last_result', $message);
+    });
 }
 
 /**
@@ -183,28 +197,26 @@ function autopost_record(bool $ok, string $message): void
  */
 function autopost_run(bool $importAll = false): array
 {
-    $channel = trim(setting('channel_id'));
-    if ($channel === '' && !config('autopost_feed_url')) {
-        return ['ok' => false, 'message' => 'YouTube kanal kimliği ayarlanmamış.', 'imported' => []];
-    }
-
-    autopost_ensure_schema();
-    $pdo = db();
-
-    $lock = $pdo->prepare('SELECT GET_LOCK(?, 0)');
-    $lock->execute([AUTOPOST_LOCK]);
-    if ((int)$lock->fetchColumn() !== 1) {
-        return ['ok' => true, 'message' => 'Başka bir kontrol zaten çalışıyor; atlandı.', 'imported' => []];
+    if (!site_lock(CONTENT_LOCK)) {
+        return ['ok' => true, 'message' => 'Başka bir kontrol veya içerik işlemi çalışıyor; atlandı.', 'imported' => []];
     }
 
     try {
+        settings_all(true);
+        $channel = trim(setting('channel_id'));
+        if ($channel === '' && !config('autopost_feed_url')) {
+            return ['ok' => false, 'message' => 'YouTube kanal kimliği ayarlanmamış.', 'imported' => []];
+        }
+        autopost_ensure_schema();
+        ensure_video_id_collations();
+        $pdo = db();
         [$body, $error] = autopost_http_get(autopost_feed_url($channel));
         if ($error !== null) {
             autopost_record(false, $error);
             return ['ok' => false, 'message' => $error, 'imported' => []];
         }
         try {
-            $entries = autopost_parse_feed((string)$body);
+            $entries = autopost_parse_feed((string)$body, $channel);
         } catch (RuntimeException $e) {
             autopost_record(false, $e->getMessage());
             return ['ok' => false, 'message' => $e->getMessage(), 'imported' => []];
@@ -214,7 +226,6 @@ function autopost_run(bool $importAll = false): array
         $skipShorts = setting('autopost_shorts', 'include') === 'skip';
         $baseline = setting('autopost_baseline') === '';
 
-        $inPosts = $pdo->prepare('SELECT 1 FROM posts WHERE youtube_id = ?');
         $isSeen = $pdo->prepare('SELECT 1 FROM autopost_seen WHERE youtube_id = ?');
         $markSeen = $pdo->prepare('INSERT IGNORE INTO autopost_seen (youtube_id) VALUES (?)');
 
@@ -233,8 +244,7 @@ function autopost_run(bool $importAll = false): array
         $imported = [];
         $skipped = 0;
         foreach (array_reverse($entries) as $en) {          // oldest first
-            $inPosts->execute([$en['id']]);
-            if ($inPosts->fetchColumn()) {
+            if (post_exists_for_video($en['id'])) {
                 $markSeen->execute([$en['id']]);
                 continue;
             }
@@ -249,7 +259,7 @@ function autopost_run(bool $importAll = false): array
                 $skipped++;
                 continue;
             }
-            try {
+            db_transaction(function () use ($en, $isPublish, $markSeen): void {
                 save_post([
                     'title'        => $en['title'],
                     'slug'         => '',
@@ -259,14 +269,8 @@ function autopost_run(bool $importAll = false): array
                     'published_at' => $en['published'],
                     'source'       => 'auto',
                 ]);
-            } catch (PDOException $e) {
-                if ((int)($e->errorInfo[1] ?? 0) === 1062) {  // duplicate: added by someone else meanwhile
-                    $markSeen->execute([$en['id']]);
-                    continue;
-                }
-                throw $e;
-            }
-            $markSeen->execute([$en['id']]);
+                $markSeen->execute([$en['id']]);
+            });
             $imported[] = $en['title'];
         }
         set_setting('autopost_baseline', '1');
@@ -282,8 +286,10 @@ function autopost_run(bool $importAll = false): array
         }
         autopost_record(true, $msg);
         return ['ok' => true, 'message' => $msg, 'imported' => $imported];
+    } catch (Throwable $e) {
+        autopost_record(false, 'Otomatik kontrol sırasında bir hata oluştu. Ayrıntılar hata günlüğünde.');
+        throw $e;
     } finally {
-        $rel = $pdo->prepare('SELECT RELEASE_LOCK(?)');
-        $rel->execute([AUTOPOST_LOCK]);
+        site_unlock(CONTENT_LOCK);
     }
 }

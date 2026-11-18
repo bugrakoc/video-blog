@@ -5,7 +5,7 @@ require __DIR__ . '/../app/bootstrap.php';
 require APP_PATH . '/admin.php';
 admin_boot();
 
-$id = (int)($_GET['id'] ?? 0);
+$id = form_id($_GET, 'id');
 $pg = null;
 if ($id) {
     $stmt = db()->prepare('SELECT * FROM pages WHERE id = ?');
@@ -30,11 +30,15 @@ $form = [
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
+    admin_content_lock('admin/pages.php');
     foreach (['title', 'slug', 'body', 'meta_description', 'sort_order'] as $k) {
-        $form[$k] = trim((string)($_POST[$k] ?? ''));
+        $form[$k] = form_text($_POST, $k);
+        if ($k !== 'body') {
+            $form[$k] = trim($form[$k]);
+        }
     }
     $form['status'] = ($_POST['status'] ?? '') === 'draft' ? 'draft' : 'published';
-    $form['show_in_nav'] = !empty($_POST['show_in_nav']);
+    $form['show_in_nav'] = ($_POST['show_in_nav'] ?? null) === '1';
 
     if ($form['title'] === '') {
         $errors[] = 'Başlık gerekli.';
@@ -48,6 +52,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errors[] = 'Sıra bir sayı olmalı.';
     }
 
+    if (strlen($form['body']) > 16777215) {
+        $errors[] = 'İçerik çok uzun.';
+    }
+    if (!$errors && $id) {
+        $stmt = db()->prepare('SELECT 1 FROM pages WHERE id = ?');
+        $stmt->execute([$id]);
+        if (!$stmt->fetchColumn()) {
+            site_unlock(CONTENT_LOCK);
+            flash('error', 'Sayfa bulunamadı.');
+            redirect(url('admin/pages.php'));
+        }
+    }
     if (!$errors) {
         $newId = save_page([
             'title'            => $form['title'],
@@ -62,14 +78,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt = db()->prepare('SELECT slug FROM pages WHERE id = ?');
         $stmt->execute([$newId]);
         $finalSlug = (string)$stmt->fetchColumn();
-        $wanted = slugify($form['slug'] !== '' ? $form['slug'] : $form['title']);
+        $wanted = requested_slug($form['slug'], $form['title']);
         $msg = $id ? 'Kaydedildi.' : 'Sayfa eklendi.';
         if ($wanted !== '' && $wanted !== $finalSlug) {
             $msg .= ' “' . $wanted . '” adresi ayrılmış veya kullanımda olduğu için “' . $finalSlug . '” olarak ayarlandı.';
         }
+        site_unlock(CONTENT_LOCK);
         flash('ok', $msg);
         redirect(url('admin/page-edit.php?id=' . $newId));
     }
+    site_unlock(CONTENT_LOCK);
 }
 
 $isNew = !$id;
@@ -94,12 +112,13 @@ admin_header($isNew ? 'Yeni sayfa' : 'Sayfayı düzenle', 'pages');
         <input type="text" id="title" name="title" value="<?= e($form['title']) ?>" maxlength="255" required>
       </label>
       <label>İçerik <span class="hint">(Markdown)</span>
-        <textarea name="body" rows="18"><?= e($form['body']) ?></textarea>
+        <textarea name="body" rows="18">
+<?= e($form['body']) ?></textarea>
       </label>
       <details <?= ($form['slug'] !== '' || $form['meta_description'] !== '') ? 'open' : '' ?>>
         <summary>Gelişmiş: adres, SEO</summary>
         <label>Adres (slug) <span class="hint">boşsa başlıktan üretilir</span>
-          <input type="text" id="slug" name="slug" value="<?= e($form['slug']) ?>" maxlength="100" placeholder="otomatik">
+          <input type="text" id="slug" name="slug" value="<?= e($form['slug']) ?>" maxlength="190" placeholder="otomatik">
         </label>
         <label>Meta açıklama
           <textarea name="meta_description" rows="2" maxlength="300"><?= e($form['meta_description']) ?></textarea>

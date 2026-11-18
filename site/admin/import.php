@@ -15,7 +15,13 @@ $playlist = uploads_playlist_id($channel);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
-    $action = (string)($_POST['action'] ?? '');
+    $action = form_text($_POST, 'action');
+    $active = $_SESSION['import'] ?? null;
+    if (in_array($action, ['cancel', 'continue'], true)
+        && ($active === null || form_text($_POST, 'job') !== ($active['id'] ?? 'legacy'))) {
+        flash('error', 'İçe aktarma değişti. Güncel durumu kontrol edin.');
+        redirect(url('admin/import.php'));
+    }
 
     if ($action === 'cancel') {
         unset($_SESSION['import']);
@@ -24,7 +30,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'start') {
-        $key = trim((string)($_POST['api_key'] ?? ''));
+        if ($active !== null) {
+            flash('error', 'Önce mevcut içe aktarmayı tamamlayın veya iptal edin.');
+            redirect(url('admin/import.php'));
+        }
+        $key = trim(form_text($_POST, 'api_key'));
         if (!$playlist) {
             flash('error', 'Önce Ayarlar’dan geçerli bir YouTube kanal kimliği kaydedin.');
             redirect(url('admin/settings.php'));
@@ -33,7 +43,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', 'API anahtarı geçersiz görünüyor (harf, rakam, “-” ve “_” içermeli).');
             redirect(url('admin/import.php'));
         }
-        $_SESSION['import'] = import_new_state($key, $playlist, (string)($_POST['mode'] ?? 'draft'), !empty($_POST['include_unlisted']));
+        $_SESSION['import'] = import_new_state($key, $playlist, form_text($_POST, 'mode'), ($_POST['include_unlisted'] ?? null) === '1');
         $action = 'continue';
     }
 
@@ -48,7 +58,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $done = import_run($state, $budget);
         } catch (Throwable $e) {
             error_log('import: ' . $e->getMessage());
-            $state['error'] = 'Beklenmeyen hata: ' . $e->getMessage();
+            $state['error'] = 'İçe aktarma durdu. Tekrar deneyin veya sunucunun hata günlüğünü kontrol edin.';
             $done = false;
         }
         if ($done) {
@@ -56,7 +66,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                  . ($state['mode'] === 'publish' ? 'yayında' : 'taslak olarak') . '), '
                  . $state['existing'] . ' video zaten sitedeydi';
             if ($state['unavailable'] > 0) {
-                $msg .= ', ' . $state['unavailable'] . ' özel/silinmiş video atlandı';
+                $msg .= ', ' . $state['unavailable'] . ' kullanılamayan video atlandı';
             }
             if (($state['skipped_unlisted'] ?? 0) > 0) {
                 $msg .= ', ' . $state['skipped_unlisted'] . ' liste dışı video eklenmedi';
@@ -77,7 +87,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $st = $_SESSION['import'] ?? null;
-$staged = $st ? 0 : import_queue_stats()['total'];       // videos from an uploaded file waiting for confirmation
+import_ensure_schema();
+$fileJob = import_file_job($channel);
+$staged = $fileJob ? import_queue_stats()['total'] : 0;       // videos from an uploaded file waiting for confirmation
 $limit = upload_limit_bytes();
 $limitText = $limit ? 'En fazla ' . round($limit / 1048576, 1) . ' MB.' : '';
 $ytdlpCmd = $playlist
@@ -97,7 +109,7 @@ admin_header('Eski videoları içe aktar', 'settings');
     <p>
       <strong><?= (int)$st['imported'] ?></strong> video eklendi ·
       <?= (int)$st['existing'] ?> zaten vardı ·
-      <?= (int)$st['unavailable'] ?> özel/silinmiş atlandı
+      <?= (int)$st['unavailable'] ?> kullanılamayan atlandı
       <?= !empty($st['skipped_unlisted']) ? ' · ' . (int)$st['skipped_unlisted'] . ' liste dışı atlandı' : '' ?>
       <?= $st['total'] ? ' · kanalda toplam ' . (int)$st['total'] . ' video' : '' ?>
     </p>
@@ -106,11 +118,11 @@ admin_header('Eski videoları içe aktar', 'settings');
     <?php endif; ?>
     <div class="row-actions">
       <form method="post"<?= $st['error'] ? '' : ' data-autosubmit="800"' ?> class="inline">
-        <?= csrf_field() ?><input type="hidden" name="action" value="continue">
+        <?= csrf_field() ?><input type="hidden" name="job" value="<?= e($st['id'] ?? 'legacy') ?>"><input type="hidden" name="action" value="continue">
         <button class="btn primary"><?= $st['error'] ? 'Tekrar dene / Devam et' : 'Devam ediliyor… (bekleyin)' ?></button>
       </form>
       <form method="post" class="inline" data-confirm="İçe aktarma iptal edilsin mi? Eklenen videolar silinmez.">
-        <?= csrf_field() ?><input type="hidden" name="action" value="cancel">
+        <?= csrf_field() ?><input type="hidden" name="job" value="<?= e($st['id'] ?? 'legacy') ?>"><input type="hidden" name="action" value="cancel">
         <button class="btn">İptal</button>
       </form>
     </div>
@@ -121,8 +133,8 @@ admin_header('Eski videoları içe aktar', 'settings');
   <section class="editor narrow">
     <p>YouTube’un ücretsiz kanal beslemesi yalnızca son 15 videoyu verir. Kanalınızın <strong>tüm</strong> eski videolarını başlıkları, açıklamaları ve gerçek yükleme tarihleriyle sitenize eklemek için aşağıdaki üç yoldan birini seçin. Hepsi bir kerelik bir işlemdir ve hepsi aynı sonucu verir.</p>
 
-    <?php if ($staged > 0): ?>
-      <div class="flash ok">Yüklediğiniz bir dosya onayınızı bekliyor (<?= (int)$staged ?> video). <a href="import-file.php">İncele ve içe aktar →</a></div>
+    <?php if ($fileJob): ?>
+      <div class="flash ok">Dosyadan içe aktarma (<?= (int)$staged ?> video sırada). <a href="import-file.php">İncele ve içe aktar →</a></div>
     <?php endif; ?>
 
     <details class="method" open>

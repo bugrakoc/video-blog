@@ -91,8 +91,16 @@ function unique_slug(string $table, string $slug, ?int $excludeId = null, string
         if (!$taken && !($table === 'pages' && is_reserved_slug($slug))) {
             return $slug;
         }
-        $slug = $base . '-' . $i++;
+        $suffix = '-' . $i++;
+        $max = $table === 'categories' ? 120 : 190;
+        $slug = rtrim(substr($base, 0, $max - strlen($suffix)), '-') . $suffix;
     }
+}
+
+function requested_slug(string $value, string $title): string
+{
+    $slug = preg_match('/^[a-z0-9]+(?:-[a-z0-9]+)*$/D', $value) && strlen($value) <= 190 ? $value : slugify($value);
+    return $slug !== '' ? $slug : slugify($title);
 }
 
 function is_reserved_slug(string $slug): bool
@@ -106,7 +114,7 @@ function is_reserved_slug(string $slug): bool
 /** Accent-folded text stored next to each post for searching. */
 function search_text(string $title, string $body): string
 {
-    $plain = html_entity_decode(strip_tags(markdown_html($body)), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $plain = markdown_plain_text($body);
     return fold($title . ' ' . $plain);
 }
 
@@ -140,13 +148,19 @@ function markdown_html(string $md): string
     return $pd->text($md);
 }
 
+function markdown_plain_text(string $body): string
+{
+    $html = preg_replace('~<br\s*/?>|</(?:p|div|li|td|th|tr|pre|h[1-6])>~i', ' ', markdown_html($body));
+    return html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+}
+
 /** Plain-text excerpt: manual override if set, otherwise derived from the body. */
 function post_excerpt(array $post, int $len = 220): string
 {
-    if (!empty($post['excerpt'])) {
+    if (($post['excerpt'] ?? '') !== '') {
         return truncate($post['excerpt'], $len);
     }
-    $text = html_entity_decode(strip_tags(markdown_html((string)$post['body'])), ENT_QUOTES, 'UTF-8');
+    $text = markdown_plain_text((string)$post['body']);
     $text = preg_replace('~https?://\S+~u', '', $text);   // drop bare links from descriptions
     return truncate($text, $len);
 }
@@ -159,6 +173,9 @@ function tr_date(?string $datetime, bool $withTime = false): string
         return '';
     }
     $ts = strtotime($datetime);
+    if ($ts === false) {
+        return '';
+    }
     static $months = ['', 'Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık'];
     $out = date('j', $ts) . ' ' . $months[(int)date('n', $ts)] . ' ' . date('Y', $ts);
     return $withTime ? $out . ' ' . date('H:i', $ts) : $out;
@@ -189,13 +206,46 @@ function tr_compare(string $a, string $b): int
 function youtube_id(string $input): ?string
 {
     $input = trim($input);
-    if (preg_match('/^[A-Za-z0-9_-]{11}$/', $input)) {
+    $pattern = '/^[A-Za-z0-9_-]{11}$/D';
+    if (preg_match($pattern, $input)) {
         return $input;
     }
-    if (preg_match('~(?:youtu\.be/|youtube(?:-nocookie)?\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/|live/|v/))([A-Za-z0-9_-]{11})~', $input, $m)) {
-        return $m[1];
+    if (!str_contains($input, '://')) {
+        $input = 'https://' . $input;
     }
-    return null;
+    $parts = parse_url($input);
+    if (!$parts || !in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'], true)
+        || isset($parts['user']) || isset($parts['pass'])) {
+        return null;
+    }
+    $host = strtolower($parts['host'] ?? '');
+    $path = $parts['path'] ?? '';
+    $id = null;
+    if ($host === 'youtu.be') {
+        $id = trim($path, '/');
+    } elseif (in_array($host, ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtube-nocookie.com', 'www.youtube-nocookie.com'], true)) {
+        if ($path === '/watch') {
+            parse_str($parts['query'] ?? '', $query);
+            $id = $query['v'] ?? null;
+        } elseif (preg_match('~^/(?:embed|shorts|live|v)/([^/]+)/?$~D', $path, $match)) {
+            $id = $match[1];
+        }
+    }
+    return is_string($id) && preg_match($pattern, $id) ? $id : null;
+}
+
+/** A scalar form field. Scrub malformed UTF-8 before displaying or saving it. */
+function form_text(array $fields, string $key): string
+{
+    return is_string($fields[$key] ?? null) ? mb_scrub($fields[$key], 'UTF-8') : '';
+}
+
+/** Read generated numeric identifiers without coercing invalid values into a different ID. */
+function form_id(array $fields, string $key): int
+{
+    $value = $fields[$key] ?? '';
+    return is_string($value) && preg_match('/^[1-9][0-9]{0,9}$/D', $value) && (int)$value <= 4294967295
+        ? (int)$value : 0;
 }
 
 function yt_thumb(string $id, string $size = 'hqdefault'): string
@@ -210,10 +260,10 @@ function yt_embed_url(string $id): string
 
 /* ---------- Settings ---------- */
 
-function settings_all(): array
+function settings_all(bool $refresh = false): array
 {
     static $cache = null;
-    if ($cache === null) {
+    if ($cache === null || $refresh) {
         $defaults = [
             'site_name' => 'Video Blog',
             'tagline' => '',
@@ -257,7 +307,9 @@ function start_session(): void
     if (session_status() === PHP_SESSION_ACTIVE) {
         return;
     }
-    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+    $https = strtolower((string)parse_url(base_url(), PHP_URL_SCHEME)) === 'https';
+    ini_set('session.use_strict_mode', '1');
+    ini_set('session.use_only_cookies', '1');
     // PHP's default garbage collection deletes session files after 24 idle minutes, which logged the admin out
     // long before the 2-hour idle limit. Keep them at least that long (the idle limit itself is enforced in admin_boot()).
     if ((int)ini_get('session.gc_maxlifetime') < ADMIN_IDLE_SECONDS) {
@@ -266,7 +318,7 @@ function start_session(): void
     session_name(SESSION_NAME);
     session_set_cookie_params([
         'lifetime' => 0,
-        'path' => '/',
+        'path' => rtrim((string)parse_url(base_url(), PHP_URL_PATH), '/') . '/',
         'secure' => $https,
         'httponly' => true,
         'samesite' => 'Lax',
@@ -324,13 +376,52 @@ function is_admin(): bool
     return !empty($_SESSION['admin_id']);
 }
 
+/** The same idle and password checks apply to the admin panel and public previews. */
+function admin_session_problem(): ?string
+{
+    if (time() - (int)($_SESSION['last_seen'] ?? 0) >= ADMIN_IDLE_SECONDS) {
+        return 'expired';
+    }
+    $stmt = db()->prepare('SELECT password_hash FROM admins WHERE id = ?');
+    $stmt->execute([(int)$_SESSION['admin_id']]);
+    $hash = $stmt->fetchColumn();
+    return is_string($hash) && hash_equals(admin_password_fingerprint($hash), (string)($_SESSION['admin_pw'] ?? ''))
+        ? null
+        : 'revoked';
+}
+
+/** Value stored in the session at login. Changing the password changes it, which ends every other session. */
+function admin_password_fingerprint(string $passwordHash): string
+{
+    return hash('sha256', 'vb-session|' . $passwordHash);
+}
+
+/** Validate new passwords before hashing, including bcrypt's byte limit. */
+function new_password_error(string $password): ?string
+{
+    if (!mb_check_encoding($password, 'UTF-8') || str_contains($password, "\0") || mb_strlen($password) < 10) {
+        return 'Şifre en az 10 geçerli karakter içermeli.';
+    }
+    if (PASSWORD_DEFAULT === PASSWORD_BCRYPT && strlen($password) > 72) {
+        return 'Şifre en fazla 72 bayt olabilir (bazı karakterler birden fazla bayt kullanır).';
+    }
+    return null;
+}
+
 /**
  * Admin preview check for public pages (?preview=1). Ordinary visitors never get a session (no cookie, no
  * session file): one is only opened when the preview flag is present and the browser already has a session cookie.
  */
 function is_admin_preview(): bool
 {
-    return isset($_GET['preview']) && isset($_COOKIE[SESSION_NAME]) && is_admin();
+    if (($_GET['preview'] ?? null) !== '1' || empty($_COOKIE[SESSION_NAME])) {
+        return false;
+    }
+    if (!is_admin() || admin_session_problem() !== null) {
+        return false;
+    }
+    $_SESSION['last_seen'] = time();
+    return true;
 }
 
 function require_admin(): void
@@ -369,8 +460,12 @@ function render(string $name, array $vars = [], bool $layout = true): void
     $vars += ['meta' => []];
     extract($vars, EXTR_SKIP);
     ob_start();
-    require APP_PATH . '/templates/' . $name . '.php';
-    $content = ob_get_clean();
+    try {
+        require APP_PATH . '/templates/' . $name . '.php';
+        $content = ob_get_contents();
+    } finally {
+        ob_end_clean();
+    }
     if ($layout) {
         require APP_PATH . '/templates/layout.php';
     } else {

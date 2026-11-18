@@ -58,6 +58,7 @@ function yt_api_get(string $endpoint, array $params): array
         CURLOPT_TIMEOUT => 25,
         CURLOPT_CONNECTTIMEOUT => 8,
         CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_MAXFILESIZE => 4 * 1024 * 1024,
         CURLOPT_USERAGENT => 'VideoBlog/1.0',
         CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
     ]);
@@ -73,7 +74,8 @@ function yt_api_get(string $endpoint, array $params): array
     if ($http !== 200) {
         return [null, yt_api_error_message($http, is_array($json) ? $json : null)];
     }
-    if (!is_array($json)) {
+    if (!is_array($json) || !isset($json['items']) || !is_array($json['items'])
+        || !array_is_list($json['items']) || (isset($json['nextPageToken']) && !is_string($json['nextPageToken']))) {
         return [null, 'YouTube API beklenmeyen bir yanıt verdi.'];
     }
     return [$json, null];
@@ -100,13 +102,13 @@ function import_fetch_page(string $key, string $playlistId, ?string $pageToken, 
     $items = [];
     $unavailable = 0;
     $unlisted = 0;
-    foreach ((array)($json['items'] ?? []) as $it) {
-        $id = (string)($it['contentDetails']['videoId'] ?? '');
-        $title = trim((string)($it['snippet']['title'] ?? ''));
-        $privacy = (string)($it['status']['privacyStatus'] ?? 'public');
+    foreach ($json['items'] as $it) {
+        $id = $it['contentDetails']['videoId'] ?? null;
+        $title = trim(form_text((array)($it['snippet'] ?? []), 'title'));
+        $privacy = $it['status']['privacyStatus'] ?? null;
         // Deleted and private videos stay in the playlist as placeholders.
-        if (!preg_match('/^[A-Za-z0-9_-]{11}$/', $id) || !in_array($privacy, ['public', 'unlisted'], true)
-            || in_array($title, ['Private video', 'Deleted video'], true)) {
+        if (!is_string($id) || !preg_match('/^[A-Za-z0-9_-]{11}$/D', $id) || !in_array($privacy, ['public', 'unlisted'], true)
+            || in_array($title, ['Private video', 'Deleted video', '[Private video]', '[Deleted video]'], true)) {
             $unavailable++;
             continue;
         }
@@ -114,11 +116,16 @@ function import_fetch_page(string $key, string $playlistId, ?string $pageToken, 
             $unlisted++;
             continue;
         }
+        $published = video_date_to_db(form_text((array)($it['contentDetails'] ?? []), 'videoPublishedAt'));
+        if ($published === null) {
+            $unavailable++;
+            continue;
+        }
         $items[] = [
             'id' => $id,
             'title' => mb_substr($title !== '' ? $title : 'Başlıksız video', 0, 255),
-            'description' => (string)($it['snippet']['description'] ?? ''),
-            'published' => video_date_to_db($it['contentDetails']['videoPublishedAt'] ?? ($it['snippet']['publishedAt'] ?? null)),
+            'description' => form_text((array)($it['snippet'] ?? []), 'description'),
+            'published' => $published,
         ];
     }
     return [
@@ -137,33 +144,20 @@ function import_fetch_page(string $key, string $playlistId, ?string $pageToken, 
  */
 function import_save_video(array $v, string $mode): string
 {
-    $pdo = db();
-    $inPosts = $pdo->prepare('SELECT 1 FROM posts WHERE youtube_id = ?');
-    $markSeen = $pdo->prepare('INSERT IGNORE INTO autopost_seen (youtube_id) VALUES (?)');
-
-    $inPosts->execute([$v['id']]);
-    if ($inPosts->fetchColumn()) {
-        $markSeen->execute([$v['id']]);
-        return 'existing';
-    }
-    try {
+    $result = 'existing';
+    if (!post_exists_for_video($v['id'])) {
         save_post([
             'title'        => $v['title'],
             'slug'         => '',
             'youtube_id'   => $v['id'],
-            'body'         => description_to_markdown((string)$v['description']),
+            'body'         => description_to_markdown($v['description']),
             'status'       => $mode === 'publish' ? 'published' : 'draft',
             'published_at' => $v['published'],
             'source'       => 'auto',
         ]);
         $result = 'imported';
-    } catch (PDOException $e) {
-        if ((int)($e->errorInfo[1] ?? 0) !== 1062) {
-            throw $e;
-        }
-        $result = 'existing';                     // added by someone else meanwhile
     }
-    $markSeen->execute([$v['id']]);
+    mark_video_seen($v['id']);
     return $result;
 }
 
@@ -171,9 +165,9 @@ function import_save_video(array $v, string $mode): string
 function import_new_state(string $key, string $playlistId, string $mode, bool $includeUnlisted = false): array
 {
     return [
-        'key' => $key, 'playlist' => $playlistId, 'mode' => $mode === 'publish' ? 'publish' : 'draft',
+        'id' => bin2hex(random_bytes(16)), 'key' => $key, 'playlist' => $playlistId, 'mode' => $mode === 'publish' ? 'publish' : 'draft',
         'include_unlisted' => $includeUnlisted,
-        'token' => null, 'pages' => 0, 'total' => 0,
+        'token' => null, 'seen_tokens' => [], 'pages' => 0, 'total' => 0,
         'imported' => 0, 'existing' => 0, 'unavailable' => 0, 'skipped_unlisted' => 0,
         'done' => false, 'error' => null,
     ];
@@ -185,12 +179,7 @@ function import_new_state(string $key, string $playlistId, string $mode, bool $i
  */
 function import_run(array &$state, float $budgetSeconds): bool
 {
-    autopost_ensure_schema();
-    $pdo = db();
-
-    $lock = $pdo->prepare('SELECT GET_LOCK(?, 0)');
-    $lock->execute([AUTOPOST_LOCK]);
-    if ((int)$lock->fetchColumn() !== 1) {
+    if (!site_lock(CONTENT_LOCK)) {
         $state['error'] = 'Başka bir içe aktarma veya otomatik kontrol çalışıyor. Birkaç saniye sonra tekrar deneyin.';
         return false;
     }
@@ -198,35 +187,55 @@ function import_run(array &$state, float $budgetSeconds): bool
     $started = microtime(true);
     $state['error'] = null;
     try {
+        settings_all(true);
+        if (uploads_playlist_id(setting('channel_id')) !== $state['playlist']) {
+            $state['error'] = 'Kanal ayarlarda değişti. Bu içe aktarmayı iptal edip yeni kanal için yeniden başlatın.';
+            return false;
+        }
+        autopost_ensure_schema();
+        ensure_video_id_collations();
         do {
             $page = import_fetch_page($state['key'], $state['playlist'], $state['token'], !empty($state['include_unlisted']));
             if (isset($page['error'])) {
                 $state['error'] = $page['error'];
                 return false;
             }
-            if ($state['total'] === 0) {
-                $state['total'] = $page['total'];
+            $next = $page['next'];
+            if ($next !== null && ($next === $state['token'] || isset($state['seen_tokens'][$next]))) {
+                $state['error'] = 'YouTube aynı sayfayı tekrar döndürdü. İşlemi iptal edip yeniden başlatın.';
+                return false;
             }
+
+            $counts = db_transaction(function () use ($page, $state): array {
+                $counts = ['imported' => 0, 'existing' => 0];
+                foreach ($page['items'] as $v) {
+                    $counts[import_save_video($v, $state['mode'])]++;
+                }
+                if ($page['next'] === null) {
+                    set_setting('autopost_baseline', '1');
+                }
+                return $counts;
+            });
+            $state['total'] = $page['total'];
+            $state['imported'] += $counts['imported'];
+            $state['existing'] += $counts['existing'];
             $state['unavailable'] += $page['unavailable'];
             $state['skipped_unlisted'] = ($state['skipped_unlisted'] ?? 0) + $page['unlisted'];
 
-            foreach ($page['items'] as $v) {
-                $state[import_save_video($v, $state['mode'])]++;
-            }
-
             // Only advance after the whole page is saved, so a crash re-runs this page (dedupe makes that safe).
-            $state['token'] = $page['next'];
+            if ($next !== null) {
+                $state['seen_tokens'][$next] = true;
+            }
+            $state['token'] = $next;
             $state['pages']++;
             if ($page['next'] === null) {
                 $state['done'] = true;
-                set_setting('autopost_baseline', '1');    // everything is known now; the autoposter only needs future videos
                 return true;
             }
         } while ((microtime(true) - $started) < $budgetSeconds);
 
         return false;
     } finally {
-        $rel = $pdo->prepare('SELECT RELEASE_LOCK(?)');
-        $rel->execute([AUTOPOST_LOCK]);
+        site_unlock(CONTENT_LOCK);
     }
 }

@@ -7,7 +7,8 @@ admin_boot();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
-    $id = (int)($_POST['id'] ?? 0);
+    admin_content_lock('admin/pages.php');
+    $id = form_id($_POST, 'id');
     $stmt = db()->prepare('SELECT * FROM pages WHERE id = ?');
     $stmt->execute([$id]);
     $pg = $stmt->fetch();
@@ -17,10 +18,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         db()->prepare('DELETE FROM pages WHERE id = ?')->execute([$id]);
         flash('ok', 'Silindi: ' . $pg['title']);
     }
+    site_unlock(CONTENT_LOCK);
     redirect(url('admin/pages.php'));
 }
 
-$pages = db()->query('SELECT * FROM pages ORDER BY sort_order, title')->fetchAll();
+$pages = db()->query('SELECT * FROM pages ORDER BY sort_order, id')->fetchAll();
+usort($pages, fn($a, $b) => ($a['sort_order'] <=> $b['sort_order']) ?: tr_compare($a['title'], $b['title']));
 
 admin_header('Sayfalar', 'pages');
 ?>

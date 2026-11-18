@@ -7,10 +7,20 @@ admin_boot();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
-    $action = (string)($_POST['action'] ?? '');
-    $id = (int)($_POST['id'] ?? 0);
-    $name = trim(preg_replace('/\s+/u', ' ', (string)($_POST['name'] ?? '')));
+    admin_content_lock('admin/categories.php');
+    $action = form_text($_POST, 'action');
+    $id = form_id($_POST, 'id');
+    $name = trim(preg_replace('/\s+/u', ' ', form_text($_POST, 'name')));
 
+    if (in_array($action, ['rename', 'delete'], true)) {
+        $stmt = db()->prepare('SELECT 1 FROM categories WHERE id = ?');
+        $stmt->execute([$id]);
+        if (!$stmt->fetchColumn()) {
+            site_unlock(CONTENT_LOCK);
+            flash('error', 'Kategori bulunamadı.');
+            redirect(url('admin/categories.php'));
+        }
+    }
     if ($action === 'add' || $action === 'rename') {
         if ($name === '' || mb_strlen($name) > 100 || slugify($name) === '') {
             flash('error', 'Geçerli bir kategori adı girin (en az bir harf veya rakam, en fazla 100 karakter).');
@@ -35,6 +45,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         db()->prepare('DELETE FROM categories WHERE id = ?')->execute([$id]);
         flash('ok', 'Kategori silindi (videolar silinmedi).');
     }
+    site_unlock(CONTENT_LOCK);
     redirect(url('admin/categories.php'));
 }
 

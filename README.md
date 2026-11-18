@@ -40,9 +40,11 @@ site/                  # contents go into public_html
 
 1. Upload the contents of `site/` to `public_html`. Make sure the hidden `.htaccess` files are included, including `app/.htaccess`.
 2. In DirectAdmin, create a MariaDB database and user.
-3. Edit `app/config.php`: database details and your real `base_url` (no trailing slash).
-4. Open `/install.php`, choose an admin username and password (10+ characters), and run it.
+3. Edit `app/config.php` with your database details and real `base_url` (no trailing slash). Set `db.port` if the database uses a custom TCP port. PHP needs `mbstring` and `pdo_mysql`. The autoposter needs DOM and either cURL or `allow_url_fopen`. API imports need cURL and ZIP uploads need `zip`.
+4. Open `/install.php`, choose an admin username and password (at least 10 characters, up to 72 bytes with bcrypt), and run it.
 5. Delete `install.php`.
+
+On existing installations, the first video write or import updates the YouTube ID columns to compare IDs case-sensitively. The database user needs `ALTER` on the three video tables for this upgrade. An older file import queue can be previewed and confirmed again after updating.
 
 ## Admin panel
 
@@ -66,9 +68,9 @@ New uploads on your channel are imported by `cron/autopost.php`, which reads the
 **How it behaves**
 
 - **First check imports nothing.** It only marks the videos already on your channel as seen, so your homepage isn't flooded with old videos. Only videos uploaded afterwards are added. Use **Son videoları içe aktar** (or `php cron/autopost.php --import-all`) to also import the latest ones (the feed holds at most 15).
-- **No duplicates, no resurrections.** A video already on the site (even one you added by hand) is skipped, and a video you delete won't come back on the next run. Changing the channel ID starts a fresh baseline.
+- **No duplicates during routine checks.** The autoposter skips videos already on the site and remembers videos you delete. The explicit **Son videoları içe aktar** action can re-add deleted videos. Changing the channel ID starts a fresh baseline.
 - **Imported posts** use the video's real upload date, `source = auto`, and the description as the body. The description stays plain text: hashtags, `-----` / `=====` separator lines, numbered or dashed lines and indentation are escaped so they don't turn into headings, lists or code blocks. Review them in the post list and add categories before publishing.
-- **Shorts** can be included or skipped (setting).
+- **Shorts** can be included or skipped when YouTube identifies them as Shorts in the feed link. Ordinary watch links carry no format label.
 - **Quiet cron:** the script prints output only when it adds videos or hits an error, so DirectAdmin doesn't email you every run. Use `-v` for a status line every time. The last result is also shown on the settings page.
 - A feed error (wrong channel ID, YouTube unreachable) is reported but never changes existing posts.
 
@@ -102,14 +104,14 @@ Upload the resulting `videolar.jsonl`. `--print-to-file` is used on purpose: she
 2. Credentials → Create credentials → **API key**. Restrict it to *YouTube Data API v3* only. Do **not** add an HTTP-referrer restriction (requests come from your server, not a browser).
 3. Paste the key into the import page and choose draft (recommended) or publish. Private and deleted videos are never imported; *unlisted* videos are skipped unless you tick *Liste dışı videoları da ekle* (they would become public posts).
 
-The key is kept only in your admin session while the import runs, never in the database or in files, and you can delete it in Google Cloud afterwards. The free quota (10,000 units/day) is plenty: 50 videos cost 1 unit.
+The key is held in the server-side PHP admin session while the import runs. You can delete it in Google Cloud afterwards. The free quota (10,000 units/day) is plenty: 50 videos cost 1 unit.
 
 **How file imports behave**
 
 - **Validated before anything is created.** The uploaded file is read and checked, then a preview shows how many videos will be added, how many are already on the site, the date range, the five newest titles with thumbnails, and everything that was skipped and why. Nothing touches the site until you press *İçe aktarmayı başlat*.
-- **Strict about content.** Unreadable rows, unknown privacy values and files from a different channel than the one in Settings are reported rather than guessed at. Private and deleted videos are never imported. *Unlisted* videos are listed in the preview and only imported if you tick the box. Live and not-yet-published streams are skipped.
+- **Strict about content.** Unreadable rows, unknown privacy values and files from a different channel than the one in Settings are reported rather than guessed at. Private and deleted videos are never imported. *Unlisted* videos are listed in the preview and only imported if you tick the box. Live and not-yet-published entries are skipped when identified by the export’s status or timestamp. yt-dlp rows require a title, description field, date and known availability. If YouTube omits availability for some videos, use Takeout for those entries.
 - **Real dates.** Takeout's publish time (or yt-dlp's upload timestamp) is converted to Istanbul time and used as the post date.
-- **Resumable.** Videos wait in a database table (`import_queue`) and are turned into posts in time-limited steps of about 20 seconds that continue automatically, so large channels work on shared hosting. If something fails or you close the tab, you do not need to upload the file again: open the import page and continue. A video leaves the queue only after its post is saved.
+- **Resumable.** Videos wait in a database table (`import_queue`) and are turned into posts in time-limited steps of about 20 seconds that continue automatically, so large channels work on shared hosting. If something fails or you close the tab, you do not need to upload the file again: open the import page from any admin session and continue. A video leaves the queue in the same transaction that saves its post.
 - Everything imported is marked as seen for the autoposter. Unlike the API import, a file import does not mark the autoposter's baseline as complete, so videos uploaded after the file was created are not lost: use **Son videoları içe aktar** once (the completion message reminds you).
 
 Notes for all methods: videos already on the site are skipped; run the import once, because a video you deleted on purpose will come back if it is still in the file or on the channel; imported posts are drafts unless you choose to publish them.
@@ -128,7 +130,7 @@ Turkish content is the main reason for several design choices. Keep these when c
 
 ## Security notes
 
-- Passwords are hashed with `password_hash`. Login is limited to 5 failed attempts per IP per 15 minutes (each attempt is recorded before the password is checked, so parallel requests can't get around the limit), and an unknown username takes as long to reject as a wrong password. Sessions end after 2 hours of inactivity, and changing the password logs out every other session. Every form (including logout and delete) needs a CSRF token. All SQL uses prepared statements, and all output goes through `e()`.
+- Passwords are hashed with `password_hash`. Login is limited to 5 failed attempts per IP per 15 minutes (each attempt is recorded before the password is checked, so parallel requests can't get around the limit), and an unknown username takes as long to reject as a wrong password. Sessions end after 2 hours of inactivity, and changing the password logs out every other session. Every form (including logout and delete) needs a CSRF token. Database queries bind user-provided values. HTML, JSON and XML use their respective escaping functions.
 - `install.php` refuses to run once an admin account exists, even if `app/installed.lock` is lost (for example after re-uploading `app/`). Still delete `install.php` after installing.
 - Public pages never start a session (no cookie for visitors); only `?preview=1` links opened by a logged-in admin do.
 - Markdown is rendered with Parsedown in safe mode, so raw HTML in post bodies is escaped.
@@ -138,13 +140,14 @@ Turkish content is the main reason for several design choices. Keep these when c
 ## Local testing
 
 ```
-php -S 127.0.0.1:8099 router.php
+php tests/regression.php
+php -S 127.0.0.1:8099 -t site tests/router.php
 ```
 
-where `router.php` returns `false` for existing files and otherwise requires `index.php` (mimicking the `.htaccess` rewrite). Set `base_url` to `http://127.0.0.1:8099` and `debug` to `true` in your local config.
+The regression tests do not need a database. For the development server, set `base_url` to `http://127.0.0.1:8099` and `debug` to `true` in your local config.
 
 To test the autoposter without YouTube, add `'autopost_feed_url' => 'http://127.0.0.1:8098/feed.xml',` to the local `app/config.php` and serve a sample Atom feed there (same structure as YouTube's). The API import can be pointed at a fake API with `'youtube_api_base' => 'http://127.0.0.1:8098/youtube/v3'`, and both import methods can be made to process one step per request with `'import_time_budget' => 0`. File imports need no fake server: upload a Takeout zip or a yt-dlp `.jsonl` through the admin page. Remove these keys afterwards. (`php -S` caches `config.php` for about 2 seconds, so wait a moment after editing it.)
 
 ## Credits
 
-Markdown rendering by [Parsedown](https://github.com/erusev/parsedown) 1.7.4 (MIT), lightly patched for PHP 8.4 nullable-parameter deprecations.
+Markdown rendering by [Parsedown](https://github.com/erusev/parsedown) 1.8.0 (MIT).

@@ -32,9 +32,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($ok) {
             login_clear_failures($ip);
             $hash = $row['password_hash'];
-            if (password_needs_rehash($hash, PASSWORD_DEFAULT)) {
+            if (password_needs_rehash($hash, PASSWORD_DEFAULT) && new_password_error($pass) === null) {
                 $hash = password_hash($pass, PASSWORD_DEFAULT);
-                db()->prepare('UPDATE admins SET password_hash = ? WHERE id = ?')->execute([$hash, $row['id']]);
+                if (!replace_admin_password((int)$row['id'], $row['password_hash'], $hash)) {
+                    flash('error', 'Şifre değiştirildi. Güncel şifreyle tekrar giriş yapın.');
+                    redirect(url('admin/login.php'));
+                }
             }
             admin_session_login((int)$row['id'], $hash);
             redirect(url('admin/index.php'));

@@ -8,30 +8,30 @@ header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: SAMEORIGIN');
 header('Referrer-Policy: strict-origin-when-cross-origin');   // YouTube embeds need the origin, so not no-referrer
 
-if (!is_file(APP_PATH . '/installed.lock') && is_file(__DIR__ . '/install.php')) {
-    // Only a site without an admin account is sent to the installer (a lost lock file alone doesn't count).
-    try {
-        $installed = admin_account_exists();
-    } catch (Throwable $ex) {
-        $installed = false;
-    }
-    if (!$installed) {
-        redirect(url('install.php'));
-    }
+if (($_GET['preview'] ?? null) === '1') {
+    // Browsers and proxies must fetch previews anew, even after a guest received a 404.
+    header('Cache-Control: private, no-store');
 }
-
-$path = (string)parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
+$path = explode('?', $_SERVER['REQUEST_URI'] ?? '/', 2)[0];
+$prefix = rtrim((string)parse_url(base_url(), PHP_URL_PATH), '/');
+if ($prefix !== '' && ($path === $prefix || str_starts_with($path, $prefix . '/'))) {
+    $path = substr($path, strlen($prefix));
+}
 $path = trim(rawurldecode($path), '/');
 $segments = $path === '' ? [] : explode('/', $path);
-$perPage = (int)config('posts_per_page') ?: 12;
+$perPage = max(1, min(100, (int)(config('posts_per_page') ?: 12)));
 // ?page=N must be 1..999999. Anything else becomes 0 and gets a 404 (huge numbers used to cause a database error).
 $rawPage = $_GET['page'] ?? '1';
-$page = $rawPage === '' ? 1 : (is_string($rawPage) && preg_match('/^[1-9][0-9]{0,5}$/', $rawPage) ? (int)$rawPage : 0);
+$page = is_string($rawPage) && preg_match('/^[1-9][0-9]{0,5}$/D', $rawPage) ? (int)$rawPage : 0;
 
 try {
+    if (!is_file(APP_PATH . '/installed.lock') && is_file(__DIR__ . '/install.php') && !admin_account_exists()) {
+        redirect(url('install.php'));
+    }
+
     // /
     if (!$segments || $segments === ['index.php']) {
-        [$posts, $total] = list_posts($page, $perPage);
+        [$posts, $total] = $page === 0 ? [[], 0] : list_posts($page, $perPage);
         check_page($page, $posts);
         render('list', [
             'posts' => $posts, 'total' => $total, 'page' => $page, 'perPage' => $perPage,
@@ -44,14 +44,11 @@ try {
     $first = $segments[0];
 
     // /post/{slug}
-    if ($first === 'post' && count($segments) === 2) {
+    if ($first === 'post' && count($segments) === 2 && preg_match('/^[a-z0-9-]+$/iD', $segments[1])) {
         $preview = is_admin_preview();
         $post = get_post_by_slug($segments[1], $preview);
         if (!$post) {
             not_found();
-        }
-        if ($preview) {
-            header('Cache-Control: private, no-store');
         }
         render('post', [
             'post' => $post, 'preview' => $preview && !post_is_live($post),
@@ -62,12 +59,12 @@ try {
     }
 
     // /category/{slug}
-    if ($first === 'category' && count($segments) === 2) {
+    if ($first === 'category' && count($segments) === 2 && preg_match('/^[a-z0-9-]+$/iD', $segments[1])) {
         $cat = get_category_by_slug($segments[1]);
         if (!$cat) {
             not_found();
         }
-        [$posts, $total] = list_posts($page, $perPage, ['category_id' => (int)$cat['id']]);
+        [$posts, $total] = $page === 0 ? [[], 0] : list_posts($page, $perPage, ['category_id' => (int)$cat['id']]);
         check_page($page, $posts);
         render('list', [
             'posts' => $posts, 'total' => $total, 'page' => $page, 'perPage' => $perPage,
@@ -83,11 +80,11 @@ try {
 
     // /search?q=
     if ($first === 'search' && count($segments) === 1) {
-        $q = trim(is_string($_GET['q'] ?? null) ? $_GET['q'] : '');
+        $q = mb_substr(trim(mb_scrub(is_string($_GET['q'] ?? null) ? $_GET['q'] : '')), 0, 100);
         $posts = [];
         $total = 0;
         if ($q !== '') {
-            [$posts, $total] = list_posts($page, $perPage, ['search' => mb_substr($q, 0, 100)]);
+            [$posts, $total] = $page === 0 ? [[], 0] : list_posts($page, $perPage, ['search' => $q]);
         }
         check_page($page, $posts);
         render('list', [
@@ -107,29 +104,28 @@ try {
     }
     if ($path === 'sitemap.xml') {
         require APP_PATH . '/feeds.php';
-        output_sitemap();
+        output_sitemap($page, isset($_GET['page']));
         exit;
     }
     if ($path === 'robots.txt') {
         header('Content-Type: text/plain; charset=utf-8');
-        echo "User-agent: *\nDisallow: /admin/\nDisallow: /search\n\nSitemap: " . url('sitemap.xml') . "\n";
+        echo "User-agent: *\nDisallow: " . $prefix . "/admin/\nDisallow: " . $prefix . "/search\n\nSitemap: " . url('sitemap.xml') . "\n";
         exit;
     }
 
     // /{slug}: static page
-    if (count($segments) === 1) {
+    if (count($segments) === 1 && preg_match('/^[a-z0-9-]+$/iD', $first)) {
         $preview = is_admin_preview();
         $pg = get_page_by_slug($first, $preview);
         if ($pg) {
-            if ($preview) {
-                header('Cache-Control: private, no-store');
-            }
             render('page', [
                 'pg' => $pg,
+                'preview' => $pg['status'] === 'draft',
                 'meta' => [
                     'title' => $pg['title'],
                     'description' => $pg['meta_description'] ?: post_excerpt(['body' => $pg['body'], 'excerpt' => null], 160),
                     'canonical' => url($pg['slug']),
+                    'robots' => $pg['status'] === 'draft' ? 'noindex,nofollow' : 'index,follow',
                 ],
             ]);
             exit;
@@ -179,7 +175,6 @@ function post_meta(array $post): array
             'thumbnailUrl' => [$thumb],
             'uploadDate' => date('c', strtotime($published)),
             'embedUrl' => yt_embed_url($post['youtube_id']),
-            'contentUrl' => 'https://www.youtube.com/watch?v=' . $post['youtube_id'],
             'inLanguage' => 'tr',
         ],
     ];

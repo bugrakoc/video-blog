@@ -6,7 +6,7 @@ if ($pages <= 1) {
 }
 $link = function (int $n) use ($basePath, $query) {
     $qs = [];
-    if (!empty($query)) {
+    if ($query !== '') {
         $qs['q'] = $query;
     }
     if ($n > 1) {

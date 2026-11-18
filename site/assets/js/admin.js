@@ -6,14 +6,16 @@
     var msg = e.target.getAttribute && e.target.getAttribute('data-confirm');
     if (msg && !window.confirm(msg)) {
       e.preventDefault();
+    } else if (timer) {
+      clearTimeout(timer);
     }
   });
 
   // Auto-continue long jobs: <form data-autosubmit="800"> submits itself after that many ms.
   var auto = document.querySelector('form[data-autosubmit]');
-  if (auto) {
-    setTimeout(function () { auto.submit(); }, parseInt(auto.getAttribute('data-autosubmit'), 10) || 800);
-  }
+  var timer = auto && setTimeout(function () {
+    auto.requestSubmit();
+  }, parseInt(auto.getAttribute('data-autosubmit'), 10) || 800);
 
   // Video editor: thumbnail preview + fetch the title from YouTube.
   var urlInput = document.getElementById('youtube_url');
@@ -24,13 +26,37 @@
   var previewBox = document.getElementById('yt-preview');
   var thumb = document.getElementById('yt-thumb');
   var button = document.getElementById('fetch-title');
-  var lastFetched = '';
+  var request = 0;
+  var pending = null;
+  var autoTitle = null;
 
-  function videoId(v) {
-    v = (v || '').trim();
-    if (/^[A-Za-z0-9_-]{11}$/.test(v)) return v;
-    var m = v.match(/(?:youtu\.be\/|youtube(?:-nocookie)?\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/|v\/))([A-Za-z0-9_-]{11})/);
-    return m ? m[1] : null;
+  function videoId(value) {
+    var input = value.trim();
+    var pattern = /^[A-Za-z0-9_-]{11}$/;
+    if (pattern.test(input)) return input;
+
+    var parsed;
+    try {
+      parsed = new URL(input.includes('://') ? input : 'https://' + input);
+    } catch (err) {
+      return null;
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return null;
+
+    var id = null;
+    if (parsed.hostname === 'youtu.be') {
+      id = parsed.pathname.replace(/^\/+|\/+$/g, '');
+    } else if (['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com',
+                'youtube-nocookie.com', 'www.youtube-nocookie.com'].includes(parsed.hostname)) {
+      var path = parsed.pathname.match(/^\/(?:embed|shorts|live|v)\/([^/]+)\/?$/);
+      if (parsed.pathname === '/watch') {
+        var ids = parsed.searchParams.getAll('v');
+        id = ids.length ? ids[ids.length - 1] : null;
+      } else if (path) {
+        id = path[1];
+      }
+    }
+    return id && pattern.test(id) ? id : null;
   }
 
   function setStatus(text) { if (statusEl) statusEl.textContent = text; }
@@ -48,23 +74,51 @@
   function fetchTitle(force) {
     var id = videoId(urlInput.value);
     showThumb(id);
-    if (!id) { setStatus('Geçerli bir YouTube bağlantısı değil.'); return; }
-    if (!force && (titleInput.value.trim() !== '' || lastFetched === id)) return;
-    lastFetched = id;
+    if (!id) {
+      request++;
+      pending = null;
+      setStatus('Geçerli bir YouTube bağlantısı değil.');
+      return;
+    }
+    var previousTitle = titleInput.value;
+    if (!force && ((previousTitle.trim() !== '' && previousTitle !== autoTitle) || pending === id)) return;
+
+    var currentRequest = ++request;
+    pending = id;
     setStatus('Başlık getiriliyor…');
-    fetch('yt-info.php?url=' + encodeURIComponent(urlInput.value), { credentials: 'same-origin' })
+    fetch('yt-info.php?url=' + encodeURIComponent(id), { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
+        if (request !== currentRequest || videoId(urlInput.value) !== id) return;
         if (d && d.title) {
-          if (force || titleInput.value.trim() === '') titleInput.value = d.title;
+          if (titleInput.value === previousTitle) {
+            titleInput.value = d.title;
+            autoTitle = d.title;
+          }
           setStatus('Başlık getirildi' + (d.author ? ' (' + d.author + ')' : '') + '. Açıklamayı YouTube’dan kopyalayıp metin alanına yapıştırın.');
         } else {
           setStatus((d && d.error) || 'Başlık alınamadı; elle yazabilirsiniz.');
         }
       })
-      .catch(function () { setStatus('Başlık alınamadı; elle yazabilirsiniz.'); });
+      .catch(function () {
+        if (request === currentRequest && videoId(urlInput.value) === id) {
+          setStatus('Başlık alınamadı; elle yazabilirsiniz.');
+        }
+      })
+      .finally(function () {
+        if (request === currentRequest) pending = null;
+      });
   }
 
+  urlInput.addEventListener('input', function () {
+    var id = videoId(urlInput.value);
+    showThumb(id);
+    if (pending && pending !== id) {
+      request++;
+      pending = null;
+      setStatus('');
+    }
+  });
   urlInput.addEventListener('change', function () { fetchTitle(false); });
   urlInput.addEventListener('paste', function () { setTimeout(function () { fetchTitle(false); }, 0); });
   if (button) button.addEventListener('click', function () { fetchTitle(true); });
