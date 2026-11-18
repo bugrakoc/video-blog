@@ -40,9 +40,9 @@ site/                  # contents go into public_html
 
 1. Upload the contents of `site/` to `public_html`. Make sure the hidden `.htaccess` files are included, including `app/.htaccess`.
 2. In DirectAdmin, create a MariaDB database and user.
-3. Edit `app/config.php` with your database details and real `base_url` (no trailing slash). Set `db.port` if the database uses a custom TCP port. PHP needs `mbstring` and `pdo_mysql`. The autoposter needs DOM and either cURL or `allow_url_fopen`. API imports need cURL and ZIP uploads need `zip`.
-4. Open `/install.php`, choose an admin username and password (at least 10 characters, up to 72 bytes with bcrypt), and run it.
-5. Delete `install.php`.
+3. Copy `app/config.php` to `app/config.local.php` on the server. Enter your database details and real `base_url` (no trailing slash) in the local copy, which Git ignores. Set `db.port` if the database uses a custom TCP port. Existing settings in `app/config.php` still work. PHP needs `mbstring` and `pdo_mysql`. The autoposter needs DOM and either cURL or `allow_url_fopen`. API imports need cURL and ZIP uploads need `zip`.
+4. For a fresh install, generate a secret with `php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'` and paste it into `install_token` in `app/config.local.php`. Open `/install.php` over HTTPS, enter the same token, and choose an admin username and password (at least 10 characters, up to 72 bytes with bcrypt).
+5. Delete `install.php` and clear `install_token`. Existing installations can leave the token empty.
 
 On existing installations, the first video write or import updates the YouTube ID columns to compare IDs case-sensitively. The database user needs `ALTER` on the three video tables for this upgrade. An older file import queue can be previewed and confirmed again after updating.
 
@@ -85,6 +85,8 @@ The channel feed only holds the latest 15 videos. To bring in the whole back cat
 3. Upload the zip as it is (no need to unzip). If the export comes in several parts, select them all. The `.csv` inside works too.
 
 The reader works with localized Takeout headers (Turkish and English are recognised by name; any other language falls back to Takeout's fixed 28-column layout after checking the first row), UTF-8 / UTF-16 / Windows-1254 text, `,` or `;` separators, multi-line descriptions and the stray blank rows and leading spaces Takeout is known to produce. Other files in the zip (transcripts, recordings) are ignored.
+
+If the selected archives contain more than 10,000 entries in total, upload the video metadata CSVs directly.
 
 **2. yt-dlp output**
 
@@ -146,7 +148,7 @@ php -S 127.0.0.1:8099 -t site tests/router.php
 
 The regression tests do not need a database. For the development server, set `base_url` to `http://127.0.0.1:8099` and `debug` to `true` in your local config.
 
-To test the autoposter without YouTube, add `'autopost_feed_url' => 'http://127.0.0.1:8098/feed.xml',` to the local `app/config.php` and serve a sample Atom feed there (same structure as YouTube's). The API import can be pointed at a fake API with `'youtube_api_base' => 'http://127.0.0.1:8098/youtube/v3'`, and both import methods can be made to process one step per request with `'import_time_budget' => 0`. File imports need no fake server: upload a Takeout zip or a yt-dlp `.jsonl` through the admin page. Remove these keys afterwards. (`php -S` caches `config.php` for about 2 seconds, so wait a moment after editing it.)
+To test the autoposter without YouTube, add `'autopost_feed_url' => 'http://127.0.0.1:8098/feed.xml',` to `app/config.local.php` and serve a sample Atom feed there (same structure as YouTube's). The API import can be pointed at a fake API with `'youtube_api_base' => 'http://127.0.0.1:8098/youtube/v3'`, and both import methods can be made to process one step per request with `'import_time_budget' => 0`. File imports need no fake server: upload a Takeout zip or a yt-dlp `.jsonl` through the admin page. Remove these keys afterwards. (`php -S` caches `config.php` for about 2 seconds, so wait a moment after editing it.)
 
 ## Credits
 

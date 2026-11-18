@@ -13,9 +13,11 @@ $form = [];
 foreach ($keys as $k) {
     $form[$k] = setting($k, $defaults[$k] ?? '');
 }
+$version = editor_version($form);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
+    $version = form_text($_POST, 'version');
     foreach ($keys as $k) {
         $form[$k] = trim(form_text($_POST, $k));
     }
@@ -47,14 +49,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (!$errors) {
-        admin_content_lock('admin/settings.php');
-        settings_all(true);
-        $oldChannel = setting('channel_id');
-        db_transaction(function () use ($keys, $form, $oldChannel): void {
+        $locked = editor_lock($errors);
+        if ($locked) {
+            settings_all(true);
+            $current = [];
+            foreach ($keys as $k) {
+                $current[$k] = setting($k, $defaults[$k] ?? '');
+            }
+            if ($version !== editor_version($current)) {
+                $errors[] = EDITOR_CONFLICT;
+            }
+        }
+    }
+    if (!$errors) {
+        db_transaction(function () use ($keys, $form, $current): void {
             foreach ($keys as $k) {
                 set_setting($k, $form[$k]);
             }
-            if ($form['channel_id'] !== $oldChannel) {
+            if ($form['channel_id'] !== $current['channel_id']) {
                 foreach (['autopost_baseline', 'autopost_last_run', 'autopost_last_ok', 'autopost_last_result'] as $key) {
                     set_setting($key, '');
                 }
@@ -63,6 +75,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         site_unlock(CONTENT_LOCK);
         flash('ok', 'Ayarlar kaydedildi.');
         redirect(url('admin/settings.php'));
+    }
+    if (!empty($locked)) {
+        site_unlock(CONTENT_LOCK);
     }
 }
 
@@ -121,6 +136,7 @@ admin_header('Ayarlar', 'settings');
   </fieldset>
 
   <button class="btn primary">Kaydet</button>
+  <input type="hidden" name="version" value="<?= e($version) ?>">
 </form>
 
 <?php

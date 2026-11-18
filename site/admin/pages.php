@@ -9,7 +9,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     admin_content_lock('admin/pages.php');
     $id = form_id($_POST, 'id');
-    $stmt = db()->prepare('SELECT * FROM pages WHERE id = ?');
+    $stmt = db()->prepare('SELECT title FROM pages WHERE id = ?');
     $stmt->execute([$id]);
     $pg = $stmt->fetch();
     if (!$pg) {
@@ -22,7 +22,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     redirect(url('admin/pages.php'));
 }
 
-$pages = db()->query('SELECT * FROM pages ORDER BY sort_order, id')->fetchAll();
+$pages = db()->query('SELECT id, title, slug, status, show_in_nav, sort_order FROM pages ORDER BY sort_order, id')->fetchAll();
 usort($pages, fn($a, $b) => ($a['sort_order'] <=> $b['sort_order']) ?: tr_compare($a['title'], $b['title']));
 
 admin_header('Sayfalar', 'pages');

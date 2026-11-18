@@ -6,6 +6,7 @@ require __DIR__ . '/app/bootstrap.php';
 header('Content-Type: text/html; charset=utf-8');
 header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: SAMEORIGIN');
+header("Content-Security-Policy: script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'");
 header('Referrer-Policy: strict-origin-when-cross-origin');   // YouTube embeds need the origin, so not no-referrer
 
 if (($_GET['preview'] ?? null) === '1') {
@@ -123,7 +124,7 @@ try {
                 'preview' => $pg['status'] === 'draft',
                 'meta' => [
                     'title' => $pg['title'],
-                    'description' => $pg['meta_description'] ?: post_excerpt(['body' => $pg['body'], 'excerpt' => null], 160),
+                    'description' => ($pg['meta_description'] ?? '') !== '' ? $pg['meta_description'] : post_excerpt(['body' => $pg['body']], 160),
                     'canonical' => url($pg['slug']),
                     'robots' => $pg['status'] === 'draft' ? 'noindex,nofollow' : 'index,follow',
                 ],
@@ -154,7 +155,7 @@ function check_page(int $page, array $posts): void
 /** SEO + JSON-LD (VideoObject) for a single post. */
 function post_meta(array $post): array
 {
-    $desc = $post['meta_description'] ?: post_excerpt($post, 160);
+    $desc = ($post['meta_description'] ?? '') !== '' ? $post['meta_description'] : post_excerpt($post, 160);
     $canonical = url('post/' . $post['slug']);
     $thumb = yt_thumb($post['youtube_id']);
     $published = $post['published_at'] ?: $post['created_at'];

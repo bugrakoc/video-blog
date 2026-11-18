@@ -46,29 +46,15 @@ function yt_api_error_message(int $http, ?array $json): string
 }
 
 /** GET an API endpoint. Returns [decoded json|null, error message|null]. */
-function yt_api_get(string $endpoint, array $params): array
+function yt_api_get(string $endpoint, array $params, string $key): array
 {
     if (!function_exists('curl_init')) {
         return [null, 'Sunucuda curl etkin değil; içe aktarma yapılamıyor.'];
     }
     $url = yt_api_base() . '/' . $endpoint . '?' . http_build_query(array_filter($params, fn($v) => $v !== null && $v !== ''));
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 25,
-        CURLOPT_CONNECTTIMEOUT => 8,
-        CURLOPT_FOLLOWLOCATION => false,
-        CURLOPT_MAXFILESIZE => 4 * 1024 * 1024,
-        CURLOPT_USERAGENT => 'VideoBlog/1.0',
-        CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
-    ]);
-    $body = curl_exec($ch);
-    $http = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-    $cerr = curl_error($ch);
-    curl_close($ch);   // note: $url (it contains the key) is never included in messages
-
-    if ($body === false) {
-        return [null, 'YouTube API’ye bağlanılamadı: ' . ($cerr ?: 'bilinmeyen hata')];
+    [$body, $http] = http_get($url, 4 * 1024 * 1024, 25, ['X-Goog-Api-Key: ' . $key]);
+    if ($body === null) {
+        return [null, 'YouTube API yanıtı alınamadı veya boyut sınırını aştı.'];
     }
     $json = json_decode((string)$body, true);
     if ($http !== 200) {
@@ -94,8 +80,7 @@ function import_fetch_page(string $key, string $playlistId, ?string $pageToken, 
         'playlistId' => $playlistId,
         'maxResults' => IMPORT_PAGE_SIZE,
         'pageToken' => $pageToken,
-        'key' => $key,
-    ]);
+    ], $key);
     if ($err !== null) {
         return ['error' => $err];
     }
@@ -108,7 +93,7 @@ function import_fetch_page(string $key, string $playlistId, ?string $pageToken, 
         $privacy = $it['status']['privacyStatus'] ?? null;
         // Deleted and private videos stay in the playlist as placeholders.
         if (!is_string($id) || !preg_match('/^[A-Za-z0-9_-]{11}$/D', $id) || !in_array($privacy, ['public', 'unlisted'], true)
-            || in_array($title, ['Private video', 'Deleted video', '[Private video]', '[Deleted video]'], true)) {
+            || import_placeholder_title($title)) {
             $unavailable++;
             continue;
         }

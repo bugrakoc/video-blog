@@ -13,6 +13,9 @@ function config(?string $key = null)
     static $cfg = null;
     if ($cfg === null) {
         $cfg = require APP_PATH . '/config.php';
+        if (is_file(APP_PATH . '/config.local.php')) {
+            $cfg = array_replace_recursive($cfg, require APP_PATH . '/config.local.php');
+        }
     }
     return $key === null ? $cfg : ($cfg[$key] ?? null);
 }
@@ -28,6 +31,7 @@ if (config('debug')) {
 }
 
 require APP_PATH . '/db.php';
+require APP_PATH . '/http.php';
 require APP_PATH . '/functions.php';
 require APP_PATH . '/queries.php';
 require APP_PATH . '/Parsedown.php';

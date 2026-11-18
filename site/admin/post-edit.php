@@ -7,13 +7,14 @@ admin_boot();
 
 $id = form_id($_GET, 'id');
 $post = $id ? get_post($id) : null;
-if ($id && !$post) {
+if (isset($_GET['id']) && (!$id || (!$post && $_SERVER['REQUEST_METHOD'] !== 'POST'))) {
     flash('error', 'Video bulunamadı.');
     redirect(url('admin/posts.php'));
 }
 
 $allCats = get_categories();
 $errors = [];
+$version = editor_version($post);
 
 $form = [
     'youtube_url'      => $post ? 'https://www.youtube.com/watch?v=' . $post['youtube_id'] : '',
@@ -30,15 +31,16 @@ $form = [
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
-    admin_content_lock('admin/post-edit.php' . ($id ? '?id=' . $id : ''));
-    $post = $id ? get_post($id) : null;
-    if ($id && !$post) {
-        site_unlock(CONTENT_LOCK);
-        flash('error', 'Video bulunamadı.');
-        redirect(url('admin/posts.php'));
+    $version = form_text($_POST, 'version');
+    $locked = editor_lock($errors);
+    if ($locked) {
+        $post = $id ? get_post($id) : null;
+        if (($id && !$post) || $version !== editor_version($post)) {
+            $errors[] = EDITOR_CONFLICT;
+        }
+        autopost_ensure_schema();
+        ensure_video_id_collations();
     }
-    autopost_ensure_schema();
-    ensure_video_id_collations();
     foreach (['youtube_url', 'title', 'slug', 'body', 'excerpt', 'meta_description', 'published_at', 'new_categories'] as $k) {
         $form[$k] = form_text($_POST, $k);
         if ($k !== 'body') {
@@ -104,7 +106,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         flash('ok', $msg);
         redirect(url('admin/post-edit.php?id=' . $newId));
     }
-    site_unlock(CONTENT_LOCK);
+    if ($locked) {
+        site_unlock(CONTENT_LOCK);
+    }
 }
 
 $isNew = !$id;
@@ -188,5 +192,6 @@ admin_header($isNew ? 'Yeni video' : 'Videoyu düzenle', 'posts');
       </fieldset>
     </aside>
   </div>
+  <input type="hidden" name="version" value="<?= e($version) ?>">
 </form>
 <?php admin_footer();

@@ -140,7 +140,18 @@ function markdown_html(string $md): string
 {
     static $pd = null;
     if ($pd === null) {
-        $pd = new Parsedown();
+        $pd = new class extends Parsedown {
+            // Parsedown 1.8 represents entities as raw HTML, which safe mode escapes a second time.
+            // Decode only the matched entity, then let the normal text renderer escape it once.
+            protected function inlineSpecialCharacter($excerpt)
+            {
+                $inline = parent::inlineSpecialCharacter($excerpt);
+                if ($inline !== null) {
+                    $inline['element'] = ['text' => html_entity_decode($inline['element']['rawHtml'], ENT_QUOTES | ENT_HTML5, 'UTF-8')];
+                }
+                return $inline;
+            }
+        };
         $pd->setSafeMode(true);
         $pd->setBreaksEnabled(true);
         $pd->setUrlsLinked(true);
@@ -273,14 +284,16 @@ function settings_all(bool $refresh = false): array
             'twitter_handle' => '',
             'footer_text' => '',
         ];
-        $cache = $defaults;
         try {
             foreach (db()->query('SELECT `key`, `value` FROM settings') as $r) {
-                $cache[$r['key']] = (string)$r['value'];
+                $defaults[$r['key']] = (string)$r['value'];
             }
-        } catch (Throwable $ex) {
-            // tables not installed yet
+        } catch (PDOException $ex) {
+            if ($ex->getCode() !== '42S02') {
+                throw $ex;
+            }
         }
+        $cache = $defaults;
     }
     return $cache;
 }
@@ -364,8 +377,8 @@ function csrf_check(): void
        . '<p>Form gönderilemedi, çünkü güvenlik doğrulaması geçersiz. Genellikle oturumun süresi dolduğunda ya da sayfa çok uzun süre açık kaldığında olur.</p>'
        . '<p>Tarayıcının <strong>geri</strong> düğmesiyle forma dönün: yazdıklarınız çoğunlukla yerinde durur. Metni kopyalayıp sayfayı yenileyin'
        . ($loggedIn ? '' : ' (gerekirse tekrar giriş yapın)') . ' ve yeniden gönderin.</p>'
-       . '<p><a href="javascript:history.back()">← Geri dön</a>'
-       . ($loggedIn ? '' : ' · <a href="' . e(url('admin/login.php')) . '">Giriş yap</a>') . '</p>'
+       . '<p><a href="' . e(url($loggedIn ? 'admin/index.php' : 'admin/login.php')) . '">'
+       . ($loggedIn ? 'Yönetim paneline dön' : 'Giriş yap') . '</a></p>'
        . '</body></html>';
     exit;
 }

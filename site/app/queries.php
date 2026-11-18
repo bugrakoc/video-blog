@@ -67,7 +67,8 @@ function list_posts(int $page, int $perPage, array $opt = []): array
 
     // Fulltext hits that match nothing (stopwords etc.) fall back to LIKE once.
     if ($total === 0 && isset($opt['search']) && empty($opt['_force_like']) && $useFt) {
-        return list_posts($page, $perPage, $opt + ['_force_like' => true]);
+        $opt['_force_like'] = true;
+        return list_posts($page, $perPage, $opt);
     }
 
     if ($offset >= $total) {
