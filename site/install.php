@@ -6,6 +6,7 @@ require __DIR__ . '/app/bootstrap.php';
 header('Content-Type: text/html; charset=utf-8');
 header('Cache-Control: no-store');
 header('X-Frame-Options: DENY');
+header("Content-Security-Policy: script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
 header('X-Robots-Tag: noindex, nofollow');
 start_session();
 
@@ -35,11 +36,22 @@ if ($alreadyInstalled) {
     install_stop('Bu site zaten kurulmuş (veritabanında yönetici hesabı var). Güvenlik için <code>install.php</code> dosyasını silin.');
 }
 
+$installToken = config('install_token');
+if (!is_string($installToken) || !preg_match('/^[0-9a-f]{64}$/iD', $installToken)) {
+    http_response_code(403);
+    install_stop('Kurulumu açmak için app/config.local.php içinde rastgele bir install_token tanımlayın. Ayrıntılar README.md dosyasında.');
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
+    if (!hash_equals($installToken, form_text($_POST, 'install_token'))) {
+        http_response_code(403);
+        install_stop('Kurulum anahtarı geçersiz. Kurulum sayfasına dönüp yeniden deneyin.');
+    }
     $user = trim(form_text($_POST, 'username'));
     $pass = is_string($_POST['password'] ?? null) ? $_POST['password'] : '';
-    $site = trim(form_text($_POST, 'site_name')) ?: 'Video Blog';
+    $site = trim(form_text($_POST, 'site_name'));
+    $site = $site === '' ? 'Video Blog' : $site;
     $sample = ($_POST['sample'] ?? null) === '1';
 
     if (!preg_match('/^[A-Za-z0-9_.-]{3,60}$/', $user)) {
@@ -132,8 +144,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             error_log('install: ' . $ex->getMessage());
             if ($ex instanceof PDOException && !config('debug')) {
                 // Raw database errors can reveal account details to whoever opens this page.
-                $errors[] = 'Veritabanı hatası. app/config.php içindeki veritabanı bilgilerini kontrol edin. '
-                          . '(Ayrıntı sunucunun hata günlüğünde; sayfada görmek için config.php içinde debug değerini true yapın.)';
+                $errors[] = 'Veritabanı hatası. app/config.local.php içindeki veritabanı bilgilerini kontrol edin. '
+                          . '(Ayrıntı sunucunun hata günlüğünde; sayfada görmek için config.local.php içinde debug değerini true yapın.)';
             } else {
                 $errors[] = 'Hata: ' . $ex->getMessage();
             }
@@ -162,12 +174,13 @@ button{margin-top:20px;padding:10px 20px;font:inherit;background:#c2410c;color:#
     <strong>Kurulum tamamlandı.</strong>
     <ul><?php foreach ($log as $l): ?><li><?= e($l) ?></li><?php endforeach; ?></ul>
   </div>
-  <p><strong>Şimdi <code>install.php</code> dosyasını silin.</strong></p>
+  <p><strong>Şimdi <code>install.php</code> dosyasını silin ve ayarlardaki kurulum anahtarını temizleyin.</strong></p>
   <p><a href="<?= e(url()) ?>">Siteyi aç →</a></p>
 <?php else: ?>
-  <p>Önce <code>app/config.php</code> içine veritabanı bilgilerini yazın.</p>
+  <p>Önce <code>app/config.local.php</code> içine veritabanı bilgilerini yazın.</p>
   <form method="post">
     <?= csrf_field() ?>
+    <label>Kurulum anahtarı (app/config.local.php)</label><input type="password" name="install_token" autocomplete="off" required>
     <label>Site adı</label><input type="text" name="site_name" maxlength="100" value="<?= e($site ?? 'Video Blog') ?>">
     <label>Yönetici kullanıcı adı</label><input type="text" name="username" value="<?= e($user ?? '') ?>" required>
     <label>Yönetici şifresi (en az 10 karakter)</label><input type="password" name="password" required minlength="10">

@@ -19,51 +19,17 @@ function autopost_feed_url(string $channelId): string
 /** GET a URL. Returns [body, null] on success or [null, error message] on failure. */
 function autopost_http_get(string $url): array
 {
-    $maxBytes = 4 * 1024 * 1024;
-    if (function_exists('curl_init')) {
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => 20,
-            CURLOPT_CONNECTTIMEOUT => 8,
-            CURLOPT_FOLLOWLOCATION => false,
-            CURLOPT_MAXFILESIZE => $maxBytes,
-            CURLOPT_USERAGENT => 'VideoBlog/1.0',
-            CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
-        ]);
-        $body = curl_exec($ch);
-        $http = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-        $err = curl_error($ch);
-        curl_close($ch);
-        if ($body === false) {
-            return [null, 'Bağlantı hatası: ' . ($err ?: 'bilinmeyen hata')];
-        }
-        if ($http === 404) {
-            return [null, 'Kanal bulunamadı (404). Kanal kimliğini kontrol edin.'];
-        }
-        if ($http !== 200) {
-            return [null, 'YouTube beklenmeyen bir yanıt verdi (HTTP ' . $http . ').'];
-        }
-        return [(string)$body, null];
+    [$body, $http] = http_get($url, 4 * 1024 * 1024, 20);
+    if ($http === 404) {
+        return [null, 'Kanal bulunamadı (404). Kanal kimliğini kontrol edin.'];
     }
-    if (ini_get('allow_url_fopen')) {
-        $ctx = stream_context_create(['http' => ['timeout' => 20, 'user_agent' => 'VideoBlog/1.0', 'ignore_errors' => true, 'follow_location' => 0]]);
-        $body = @file_get_contents($url, false, $ctx, 0, $maxBytes + 1);
-        $status = 0;
-        foreach ($http_response_header ?? [] as $h) {
-            if (preg_match('#^HTTP/\S+\s+(\d{3})#', $h, $m)) {
-                $status = (int)$m[1];
-            }
-        }
-        if ($body === false || $status !== 200) {
-            return [null, $status === 404 ? 'Kanal bulunamadı (404). Kanal kimliğini kontrol edin.' : 'YouTube kanalına ulaşılamadı.'];
-        }
-        if (strlen($body) > $maxBytes) {
-            return [null, 'YouTube beslemesi çok büyük.'];
-        }
-        return [$body, null];
+    if ($body === null) {
+        return [null, 'YouTube beslemesi alınamadı veya boyut sınırını aştı.'];
     }
-    return [null, 'Sunucuda curl veya allow_url_fopen etkin değil.'];
+    if ($http !== 200) {
+        return [null, 'YouTube beklenmeyen bir yanıt verdi (HTTP ' . $http . ').'];
+    }
+    return [$body, null];
 }
 
 /** Read an absolute video timestamp, preserving its real date in the site's timezone. */
@@ -82,6 +48,11 @@ function video_date_to_db(?string $iso): ?string
     } catch (Exception $e) {
         return null;
     }
+}
+
+function import_placeholder_title(string $title): bool
+{
+    return in_array($title, ['Private video', 'Deleted video', '[Private video]', '[Deleted video]'], true);
 }
 
 /**
@@ -111,7 +82,9 @@ function autopost_parse_feed(string $xml, string $channel = ''): array
     if (!$xp->evaluate('boolean(/a:feed)') || $dom->doctype !== null) {
         throw new RuntimeException('Yanıt, geçerli bir YouTube kanal beslemesi değil.');
     }
-    if ($channel !== '' && $xp->evaluate('string(/a:feed/yt:channelId)') !== $channel) {
+    $feedChannel = trim((string)$xp->evaluate('string(/a:feed/yt:channelId)'));
+    // Channel feeds can omit the UC prefix at the feed level.
+    if ($channel !== '' && $feedChannel !== $channel && 'UC' . $feedChannel !== $channel) {
         throw new RuntimeException('Beslemedeki kanal kimliği ayarlarla eşleşmiyor.');
     }
 
@@ -159,13 +132,21 @@ function description_line_to_markdown(string $line): string
     }
     foreach ($parts as $i => &$part) {
         if ($i % 2 === 1) {
-            $link = rtrim($part, '.,;:!?');
+            $end = strlen($part);
+            $excess = [];
             foreach ([')' => '(', ']' => '[', '}' => '{'] as $close => $open) {
-                while (str_ends_with($link, $close) && substr_count($link, $close) > substr_count($link, $open)) {
-                    $link = substr($link, 0, -1);
-                }
+                $excess[$close] = substr_count($part, $close) - substr_count($part, $open);
             }
-            $part = '<' . $link . '>' . substr($part, strlen($link));
+            while ($end > 0) {
+                $last = $part[$end - 1];
+                if (($excess[$last] ?? 0) > 0) {
+                    $excess[$last]--;
+                } elseif (!str_contains('.,;:!?', $last)) {
+                    break;
+                }
+                $end--;
+            }
+            $part = '<' . substr($part, 0, $end) . '>' . substr($part, $end);
         } else {
             $part = strtr($part, [
                 '&' => '&amp;', '<' => '&lt;', '>' => '&gt;', '\\' => '&#92;',
@@ -173,7 +154,8 @@ function description_line_to_markdown(string $line): string
                 '[' => '\\[', ']' => '\\]', '`' => '\\`', '|' => '&#124;', '~' => '&#126;', '=' => '&#61;',
             ]);
             if ($i === 0) {
-                $part = preg_replace('/^(\d+)\./', '$1&#46;', $part);
+                $part = preg_replace_callback('/^(\d{1,9})([.)])/',
+                    static fn($m) => $m[1] . ($m[2] === '.' ? '&#46;' : '&#41;'), $part);
             }
         }
     }
@@ -231,10 +213,12 @@ function autopost_run(bool $importAll = false): array
 
         // First ever run: remember what already exists on the channel, import nothing.
         if ($baseline && !$importAll) {
-            foreach ($entries as $en) {
-                $markSeen->execute([$en['id']]);
-            }
-            set_setting('autopost_baseline', '1');
+            db_transaction(function () use ($entries, $markSeen): void {
+                foreach ($entries as $en) {
+                    $markSeen->execute([$en['id']]);
+                }
+                set_setting('autopost_baseline', '1');
+            });
             $msg = 'İlk kontrol tamamlandı: kanaldaki ' . count($entries) . ' mevcut video işaretlendi, hiçbiri eklenmedi. '
                  . 'Bundan sonra yüklenen yeni videolar otomatik eklenecek.';
             autopost_record(true, $msg);

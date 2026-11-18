@@ -13,6 +13,7 @@ function admin_boot(bool $requireLogin = true): void
 {
     header('Content-Type: text/html; charset=utf-8');
     header('X-Frame-Options: DENY');
+    header("Content-Security-Policy: script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
     header('X-Content-Type-Options: nosniff');
     header('Referrer-Policy: same-origin');
     header('Cache-Control: no-store');
@@ -142,6 +143,23 @@ function admin_content_lock(string $back): void
     }
 }
 
+/** Compare the record shown in the editor with the one under the write lock, including same-second edits. */
+function editor_version(?array $record): string
+{
+    return $record === null ? 'new' : hash('sha256', serialize($record));
+}
+
+const EDITOR_CONFLICT = 'Form eksik veya kayıt siz düzenlerken değişti. Yazdıklarınızı kopyalayıp güncel formu yeniden açın.';
+
+function editor_lock(array &$errors): bool
+{
+    if (site_lock(CONTENT_LOCK, 2)) {
+        return true;
+    }
+    $errors[] = 'Başka bir içerik işlemi çalışıyor. Biraz sonra tekrar kaydedin.';
+    return false;
+}
+
 /* ---------- Layout ---------- */
 
 function admin_header(string $title, string $active = ''): void
@@ -245,7 +263,8 @@ function admin_list_posts(int $page, string $status, string $q): array
     $per = ADMIN_PER_PAGE;
     $offset = (min(max(1, $page), 1000000) - 1) * $per;
     $stmt = db()->prepare(
-        "SELECT * FROM posts WHERE $w ORDER BY COALESCE(published_at, created_at) DESC, id DESC LIMIT $per OFFSET $offset"
+        "SELECT id, title, slug, youtube_id, status, published_at, created_at, source FROM posts
+         WHERE $w ORDER BY COALESCE(published_at, created_at) DESC, id DESC LIMIT $per OFFSET $offset"
     );
     $stmt->execute($params);
     return [attach_categories($stmt->fetchAll()), $total];

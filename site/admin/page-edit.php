@@ -7,17 +7,18 @@ admin_boot();
 
 $id = form_id($_GET, 'id');
 $pg = null;
-if ($id) {
+if (isset($_GET['id'])) {
     $stmt = db()->prepare('SELECT * FROM pages WHERE id = ?');
     $stmt->execute([$id]);
     $pg = $stmt->fetch() ?: null;
-    if (!$pg) {
+    if (!$id || (!$pg && $_SERVER['REQUEST_METHOD'] !== 'POST')) {
         flash('error', 'Sayfa bulunamadı.');
         redirect(url('admin/pages.php'));
     }
 }
 
 $errors = [];
+$version = editor_version($pg);
 $form = [
     'title'            => $pg['title'] ?? '',
     'slug'             => $pg['slug'] ?? '',
@@ -30,14 +31,24 @@ $form = [
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
-    admin_content_lock('admin/pages.php');
+    $version = form_text($_POST, 'version');
+    $locked = editor_lock($errors);
+    if ($locked) {
+        if ($id) {
+            $stmt->execute([$id]);
+            $pg = $stmt->fetch() ?: null;
+        }
+        if (($id && !$pg) || $version !== editor_version($pg)) {
+            $errors[] = EDITOR_CONFLICT;
+        }
+    }
     foreach (['title', 'slug', 'body', 'meta_description', 'sort_order'] as $k) {
         $form[$k] = form_text($_POST, $k);
         if ($k !== 'body') {
             $form[$k] = trim($form[$k]);
         }
     }
-    $form['status'] = ($_POST['status'] ?? '') === 'draft' ? 'draft' : 'published';
+    $form['status'] = ($_POST['status'] ?? '') === 'published' ? 'published' : 'draft';
     $form['show_in_nav'] = ($_POST['show_in_nav'] ?? null) === '1';
 
     if ($form['title'] === '') {
@@ -54,15 +65,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (strlen($form['body']) > 16777215) {
         $errors[] = 'İçerik çok uzun.';
-    }
-    if (!$errors && $id) {
-        $stmt = db()->prepare('SELECT 1 FROM pages WHERE id = ?');
-        $stmt->execute([$id]);
-        if (!$stmt->fetchColumn()) {
-            site_unlock(CONTENT_LOCK);
-            flash('error', 'Sayfa bulunamadı.');
-            redirect(url('admin/pages.php'));
-        }
     }
     if (!$errors) {
         $newId = save_page([
@@ -87,7 +89,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         flash('ok', $msg);
         redirect(url('admin/page-edit.php?id=' . $newId));
     }
-    site_unlock(CONTENT_LOCK);
+    if ($locked) {
+        site_unlock(CONTENT_LOCK);
+    }
 }
 
 $isNew = !$id;
@@ -138,5 +142,6 @@ admin_header($isNew ? 'Yeni sayfa' : 'Sayfayı düzenle', 'pages');
       </fieldset>
     </aside>
   </div>
+  <input type="hidden" name="version" value="<?= e($version) ?>">
 </form>
 <?php admin_footer();

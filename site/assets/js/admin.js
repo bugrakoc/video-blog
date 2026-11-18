@@ -29,6 +29,7 @@
   var request = 0;
   var pending = null;
   var autoTitle = null;
+  var autoTitleId = null;
 
   function videoId(value) {
     var input = value.trim();
@@ -94,6 +95,7 @@
           if (titleInput.value === previousTitle) {
             titleInput.value = d.title;
             autoTitle = d.title;
+            autoTitleId = id;
           }
           setStatus('Başlık getirildi' + (d.author ? ' (' + d.author + ')' : '') + '. Açıklamayı YouTube’dan kopyalayıp metin alanına yapıştırın.');
         } else {
@@ -113,12 +115,18 @@
   urlInput.addEventListener('input', function () {
     var id = videoId(urlInput.value);
     showThumb(id);
+    if (autoTitleId && autoTitleId !== id) {
+      if (titleInput.value === autoTitle) titleInput.value = '';
+      autoTitle = autoTitleId = null;
+      setStatus('');
+    }
     if (pending && pending !== id) {
       request++;
       pending = null;
       setStatus('');
     }
   });
+  titleInput.addEventListener('input', function () { autoTitle = autoTitleId = null; });
   urlInput.addEventListener('change', function () { fetchTitle(false); });
   urlInput.addEventListener('paste', function () { setTimeout(function () { fetchTitle(false); }, 0); });
   if (button) button.addEventListener('click', function () { fetchTitle(true); });

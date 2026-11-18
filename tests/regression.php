@@ -62,4 +62,56 @@ foreach (['', '<html>Not a feed</html>'] as $badFeed) {
     throw new RuntimeException('Invalid Atom feed must not initialize a baseline');
 }
 
+$description = "1) Çay & kahve <ince>\n1. Örnek\n=====\n~Etiket | Çizgi\\\\";
+$html = markdown_html(description_to_markdown($description));
+expect_same(false, str_contains($html, '<ol>'), 'Parenthesized numbering stays literal');
+expect_same(true, str_contains($html, '&lt;ince&gt;'), 'Angle brackets remain escaped HTML text');
+expect_same($description, trim(html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8')), 'Imported punctuation round trip');
+expect_same('<p>1. A &amp; B</p>', markdown_html('1&#46; A &amp; B'), 'Existing stored descriptions render correctly');
+expect_same(true, str_contains(markdown_html(description_to_markdown('([https://example.org/a_(b)]).')), 'href="https://example.org/a_(b)"'), 'Mixed trailing URL punctuation');
+expect_same('ĞİŞ', import_decode_text("\xD0\xDD\xDE"), 'Turkish Windows-1254 CSV');
+
+$channel = 'UC' . str_repeat('x', 22);
+$feed = '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015">'
+    . '<yt:channelId>%s</yt:channelId></feed>';
+foreach ([$channel, substr($channel, 2)] as $feedId) {
+    expect_same([], autopost_parse_feed(sprintf($feed, $feedId), $channel), 'Matching channel feed');
+}
+try {
+    autopost_parse_feed(sprintf($feed, str_repeat('y', 22)), $channel);
+    throw new LogicException('Wrong channel was accepted');
+} catch (RuntimeException $e) {
+    // Expected channel mismatch.
+}
+
+$public = $entry + ['availability' => 'public'];
+$other = ['id' => 'Another0001'] + $public;
+foreach ([json_encode([$public, $other]), json_encode(['entries' => [$public, $other]], JSON_PRETTY_PRINT),
+          json_encode($public) . "\r\n" . json_encode($other)] as $json) {
+    expect_same([$id, $other['id']], array_column(import_parse_ytdlp($json, 'export')['videos'], 'id'), 'Supported yt-dlp containers');
+}
+
+$file = tempnam(sys_get_temp_dir(), 'video-blog-');
+try {
+    $uploads = [['name' => 'export.jsonl', 'path' => $file]];
+    foreach ([$entry, ['availability' => 'private'] + $entry] as $restricted) {
+        file_put_contents($file, json_encode([$public, $other, $restricted]));
+        $result = import_file_analyze($uploads, '');
+        expect_same([$other['id']], array_column($result['videos'], 'id'), 'A conflicting restriction wins over an older public record');
+    }
+    file_put_contents($file, json_encode([['availability' => 'unlisted', 'description' => null] + $entry, $public]));
+    expect_same('unlisted', import_file_analyze($uploads, '')['videos'][0]['privacy'], 'Unlisted visibility survives an incomplete duplicate');
+    if (class_exists('ZipArchive')) {
+        $zip = new ZipArchive();
+        expect_same(true, $zip->open($file, ZipArchive::OVERWRITE), 'Create Takeout fixture');
+        $zip->addFromString('Takeout/videos.csv', $csv);
+        $zip->addFromString('Takeout/notes.txt', 'Export notes');
+        $zip->close();
+        $result = import_file_analyze([['name' => 'takeout.zip', 'path' => $file]], '');
+        expect_same([$id], array_column($result['videos'], 'id'), 'ZIP metadata import');
+    }
+} finally {
+    unlink($file);
+}
+
 echo "Regression tests passed.\n";

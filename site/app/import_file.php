@@ -61,7 +61,7 @@ function import_file_job(string $channel): ?array
     }
     // A pre-upgrade queue can still be previewed and confirmed.
     if (db()->query('SELECT 1 FROM import_queue LIMIT 1')->fetchColumn()) {
-        return ['id' => 'legacy', 'channel' => $channel, 'report' => null, 'run' => null];
+        return ['id' => 'legacy-' . hash('sha256', $channel), 'channel' => $channel, 'report' => null, 'run' => null];
     }
     return null;
 }
@@ -113,7 +113,7 @@ function upload_limit_bytes(): int
             'g' => $n * 1073741824, 'm' => $n * 1048576, 'k' => $n * 1024, default => $n,
         };
     };
-    $limits = array_filter([$toBytes((string)ini_get('upload_max_filesize')), $toBytes((string)ini_get('post_max_size'))]);
+    $limits = array_filter([$toBytes((string)ini_get('upload_max_filesize')), $toBytes((string)ini_get('post_max_size'))], fn($n) => $n > 0);
     return $limits ? min($limits) : 0;
 }
 
@@ -145,7 +145,7 @@ function import_label(string $name): string
 }
 
 /**
- * Expand uploaded files ([['name' => ..., 'path' => ...], ...]) into text blobs [['label', 'text'], ...].
+ * Expand uploaded files ([['name' => ..., 'path' => ...], ...]) into [label, text, fromArchive] tuples.
  * Zips are opened in memory (nothing is extracted to disk). Also returns notes about files that were skipped.
  * @return array{0: array, 1: array}
  */
@@ -153,6 +153,7 @@ function import_expand_uploads(array $uploads): array
 {
     $blobs = [];
     $notes = [];
+    $remainingEntries = 10000; // Also bound directory scans and per-entry bookkeeping for split ZIPs.
     $memoryLimit = ini_parse_quantity(ini_get('memory_limit'));
     $budget = $memoryLimit > 0
         ? min(IMPORT_FILE_MAX_TOTAL, max(0, intdiv($memoryLimit - memory_get_usage(true), 4)))
@@ -175,8 +176,13 @@ function import_expand_uploads(array $uploads): array
                 throw new RuntimeException('Bu sunucuda zip dosyaları açılamıyor. Zip’i bilgisayarınızda açıp içindeki “videolar.csv” (video meta verileri klasöründeki) dosyasını yükleyin.');
             }
             $zip = new ZipArchive();
-            if ($zip->open($up['path']) !== true) {
+            if ($zip->open($up['path'], ZipArchive::RDONLY) !== true) {
                 throw new RuntimeException('“' . $label . '” zip dosyası açılamadı; bozuk olabilir. Takeout dosyasını yeniden indirin.');
+            }
+            $remainingEntries -= $zip->numFiles;
+            if ($remainingEntries < 0) {
+                $zip->close();
+                throw new RuntimeException('Arşivlerde çok fazla dosya var. Yalnızca video meta verisi CSV dosyalarını yükleyin.');
             }
             for ($i = 0; $i < $zip->numFiles; $i++) {
                 $st = $zip->statIndex($i);
@@ -193,13 +199,13 @@ function import_expand_uploads(array $uploads): array
                     $notes[] = '“' . $entryLabel . '” çok büyük olduğu için atlandı.';
                     continue;
                 }
-                $data = $zip->getFromIndex($i, min(IMPORT_FILE_MAX_ENTRY, $budget) + 1);
+                $data = $zip->getFromIndex($i, min($declared, IMPORT_FILE_MAX_ENTRY, $budget) + 1);
                 if ($data === false) {
                     $notes[] = '“' . $entryLabel . '” zip içinden okunamadı.';
                     continue;
                 }
-                if (strlen($data) > min(IMPORT_FILE_MAX_ENTRY, $budget)) {
-                    $notes[] = '“' . $entryLabel . '” çok büyük olduğu için atlandı.';
+                if (strlen($data) !== $declared) {
+                    $notes[] = '“' . $entryLabel . '” dosyasının boyutu arşiv kaydıyla eşleşmiyor.';
                     continue;
                 }
                 $budget -= strlen($data);
@@ -208,7 +214,7 @@ function import_expand_uploads(array $uploads): array
                     $notes[] = '“' . $entryLabel . '” metin olarak okunamadı (karakter kodlaması tanınmadı).';
                     continue;
                 }
-                $blobs[] = [$entryLabel, $text];
+                $blobs[] = [$entryLabel, $text, true];
             }
             $zip->close();
             continue;
@@ -226,7 +232,7 @@ function import_expand_uploads(array $uploads): array
         if ($text === null) {
             throw new RuntimeException('“' . $label . '” metin dosyası olarak okunamadı (karakter kodlaması tanınmadı).');
         }
-        $blobs[] = [$label, $text];
+        $blobs[] = [$label, $text, false];
     }
     return [$blobs, $notes];
 }
@@ -335,17 +341,19 @@ function import_parse_takeout_csv(string $text, string $label): ?array
     for (; $rows->valid(); $rows->next()) {
         $r = $rows->current();
         $where = $label . ', kayıt ' . $rows->key();
-        if (count($r) !== count($header) || strlen($r[$cols['description']] ?? '') > IMPORT_MAX_DESCRIPTION_BYTES) {
-            import_note_invalid($src, $where, 'sütun sayısı veya açıklama boyutu geçersiz');
-            continue;
-        }
         $id = $get($r, 'id');                            // Takeout sometimes leaves a leading space on IDs
         if (!preg_match('/^[A-Za-z0-9_-]{11}$/', $id)) {
             import_note_invalid($src, $where, 'geçersiz video kimliği');
             continue;
         }
+        if (count($r) !== count($header)) {
+            import_note_invalid($src, $where, 'sütun sayısı geçersiz');
+            $src['excluded_ids'][$id] = true;
+            continue;
+        }
         $privacy = import_privacy($get($r, 'privacy'));
-        if ($privacy === 'private') {
+        $title = $get($r, 'title');
+        if ($privacy === 'private' || import_placeholder_title($title)) {
             $src['skipped']['private']++;
             $src['excluded_ids'][$id] = true;
             continue;
@@ -353,7 +361,11 @@ function import_parse_takeout_csv(string $text, string $label): ?array
         if ($privacy === null) {
             $raw = mb_substr($get($r, 'privacy'), 0, 80);
             $src['unknown_privacy'][$raw] = ($src['unknown_privacy'][$raw] ?? 0) + 1;
+            $src['excluded_ids'][$id] = true;
             continue;
+        }
+        if ($privacy === 'unlisted') {
+            $src['unlisted_ids'][$id] = true;
         }
         if (preg_match('/(basarisiz|failed|reddedil|rejected|silin|delet|iptal|abandon|processing|unprocessed|isleniyor)/', fold($get($r, 'state')))) {
             $src['skipped']['state']++;
@@ -371,9 +383,8 @@ function import_parse_takeout_csv(string $text, string $label): ?array
             $src['excluded_ids'][$id] = true;
             continue;
         }
-        $title = $get($r, 'title');
-        if ($title === '') {
-            import_note_invalid($src, $where, 'başlık yok');
+        if ($title === '' || strlen($r[$cols['description']]) > IMPORT_MAX_DESCRIPTION_BYTES) {
+            import_note_invalid($src, $where, 'başlık veya açıklama geçersiz');
             continue;
         }
         $src['videos'][] = [
@@ -402,70 +413,61 @@ function import_privacy(string $v): ?string
 /* ---------- yt-dlp JSON ---------- */
 
 /** Decode yt-dlp output: JSON lines (--print-to-file / -j), a JSON array, or one object (-J playlist dump). */
-function import_ytdlp_objects(string $text, string $label): array
+function import_ytdlp_objects(string $text, string $label): Generator
 {
     $text = trim($text);
-    $objects = [];
     if ($text === '') {
-        return [];
+        return;
     }
-    if ($text[0] === '[') {
-        $all = json_decode($text, true);
-        if (!is_array($all)) {
-            throw new RuntimeException('“' . $label . '” geçerli bir JSON dizisi değil.');
-        }
-        return $all;
-    }
-    $lines = preg_split('/\r\n|\n|\r/', $text);
-    $okLines = true;
-    foreach ($lines as $i => $line) {
-        $line = trim($line);
-        if ($line === '') {
+    // A compact JSONL file may contain many full --dump-json records with large format lists.
+    // Release the unused fields from one record before decoding the next.
+    $length = strlen($text);
+    $line = 0;
+    for ($start = 0; $start < $length;) {
+        $span = strcspn($text, "\r\n", $start);
+        $record = trim(substr($text, $start, $span));
+        $start += $span;
+        $start += strspn($text, "\r\n", $start);
+        $line++;
+        if ($record === '') {
             continue;
         }
-        $obj = json_decode($line, true);
-        if (!is_array($obj)) {
-            $okLines = false;
-            break;
+        $obj = json_decode($record, true);
+        if (!is_array($obj) && $line === 1 && $start < $length) {
+            // One pretty-printed playlist, array or video object.
+            $obj = json_decode($text, true);
+            $start = $length;
         }
-        $objects[] = $obj;
+        if (!is_array($obj)) {
+            throw new RuntimeException('“' . $label . '” geçerli yt-dlp JSON çıktısı değil (kayıt ' . $line . ').');
+        }
+        if ($record[0] === '[') {
+            yield from import_ytdlp_entries($obj);
+        } else {
+            yield from import_ytdlp_entries([$obj]);
+        }
+        unset($obj);
     }
-    if ($okLines) {
-        return $objects;
-    }
-    $whole = json_decode($text, true);               // a single pretty-printed object
-    if (is_array($whole)) {
-        return [$whole];
-    }
-    throw new RuntimeException('“' . $label . '” yt-dlp çıktısı gibi okunamadı (satır ' . ($i + 1) . ' geçerli JSON değil). Dosya komutun ürettiği hâliyle, düzenlenmeden yüklenmeli.');
 }
 
-/** Walk playlist dumps (-J) down to the individual videos. */
-function import_ytdlp_flatten(array $objs): array
+/** Walk a playlist dump without building another array of every video. */
+function import_ytdlp_entries(array $objects): Generator
 {
-    $out = [];
-    foreach ($objs as $o) {
-        if (is_array($o) && isset($o['entries']) && is_array($o['entries'])) {
-            foreach (import_ytdlp_flatten($o['entries']) as $entry) {
-                $out[] = $entry;
-            }
+    foreach ($objects as $o) {
+        if (is_array($o['entries'] ?? null)) {
+            yield from import_ytdlp_entries($o['entries']);
         } else {
-            $out[] = is_array($o) ? $o : [];
+            yield is_array($o) ? $o : [];
         }
     }
-    return $out;
 }
 
 function import_parse_ytdlp(string $text, string $label): array
 {
-    $entries = import_ytdlp_flatten(import_ytdlp_objects($text, $label));
     $src = import_new_source('yt-dlp');
-    if (!$entries) {
-        throw new RuntimeException('“' . $label . '” içinde video bulunamadı.');
-    }
-
-    foreach ($entries as $n => $o) {
-        $where = $label . ', kayıt ' . ($n + 1);
+    $n = 0;
+    foreach (import_ytdlp_objects($text, $label) as $o) {
+        $where = $label . ', kayıt ' . ++$n;
         $id = trim(form_text($o, 'id'));
         if (!preg_match('/^[A-Za-z0-9_-]{11}$/', $id)) {
             import_note_invalid($src, $where, 'geçersiz video kimliği');
@@ -487,7 +489,7 @@ function import_parse_ytdlp(string $text, string $label): array
             }
         }
         $avail = $o['availability'] ?? null;
-        if (in_array($title, ['[Private video]', '[Deleted video]', 'Private video', 'Deleted video'], true)
+        if (import_placeholder_title($title)
             || in_array($avail, ['private', 'needs_auth', 'premium_only', 'subscriber_only'], true)) {
             $src['skipped']['private']++;
             $src['excluded_ids'][$id] = true;
@@ -502,9 +504,11 @@ function import_parse_ytdlp(string $text, string $label): array
             $privacy = 'public';
         } elseif ($avail === 'unlisted') {
             $privacy = 'unlisted';
+            $src['unlisted_ids'][$id] = true;
         } else {
             $key = is_string($avail) ? mb_substr($avail, 0, 80) : '(boş veya geçersiz)';
             $src['unknown_privacy'][$key] = ($src['unknown_privacy'][$key] ?? 0) + 1;
+            $src['excluded_ids'][$id] = true;
             continue;
         }
         if ($published === null) {
@@ -530,6 +534,9 @@ function import_parse_ytdlp(string $text, string $label): array
         ];
     }
 
+    if ($n === 0) {
+        throw new RuntimeException('“' . $label . '” içinde video bulunamadı.');
+    }
     return $src;
 }
 
@@ -538,7 +545,7 @@ function import_parse_ytdlp(string $text, string $label): array
 function import_new_source(string $kind): array
 {
     return [
-        'kind' => $kind, 'videos' => [], 'excluded_ids' => [], 'by_position' => false,
+        'kind' => $kind, 'videos' => [], 'excluded_ids' => [], 'unlisted_ids' => [], 'by_position' => false,
         'skipped' => ['private' => 0, 'state' => 0, 'live' => 0, 'other_channel' => 0],
         'unknown_privacy' => [], 'invalid' => [], 'invalid_count' => 0,
     ];
@@ -564,7 +571,7 @@ function import_file_analyze(array $uploads, string $channel): array
     $sources = [];
     $recognized = [];
     $ignored = [];
-    foreach ($blobs as [$label, $text]) {
+    foreach ($blobs as [$label, $text, $fromArchive]) {
         $trim = ltrim($text);
         if ($trim === '') {
             $ignored[] = $label;
@@ -574,7 +581,8 @@ function import_file_analyze(array $uploads, string $channel): array
             try {
                 $src = import_parse_ytdlp($text, $label);
             } catch (RuntimeException $e) {
-                if (count($blobs) === 1) {
+                // Do not proceed with older records after an explicitly uploaded export failed validation.
+                if (!$fromArchive || count($blobs) === 1 || preg_match('/\.(?:jsonl|ndjson)$/i', $label)) {
                     throw $e;
                 }
                 $notes[] = $e->getMessage();
@@ -603,6 +611,7 @@ function import_file_analyze(array $uploads, string $channel): array
     $videos = [];
     $dupes = 0;
     $excludedIds = [];
+    $unlistedIds = [];
     $skipped = ['private' => 0, 'state' => 0, 'live' => 0, 'other_channel' => 0];
     $unknown = [];
     $invalid = [];
@@ -613,6 +622,7 @@ function import_file_analyze(array $uploads, string $channel): array
     foreach ($sources as $s) {
         $kinds[$s['kind']] = true;
         $excludedIds += $s['excluded_ids'];
+        $unlistedIds += $s['unlisted_ids'];
         $byPosition = $byPosition || $s['by_position'];
         foreach ($s['skipped'] as $k => $n) {
             $skipped[$k] += $n;
@@ -632,9 +642,6 @@ function import_file_analyze(array $uploads, string $channel): array
             }
             if (isset($videos[$v['id']])) {
                 $dupes++;
-                if ($v['privacy'] === 'unlisted') {
-                    $videos[$v['id']]['privacy'] = 'unlisted';
-                }
                 continue;
             }
             $videos[$v['id']] = $v;
@@ -650,6 +657,9 @@ function import_file_analyze(array $uploads, string $channel): array
         );
     }
     $videos = array_diff_key($videos, $excludedIds);
+    foreach (array_intersect_key($unlistedIds, $videos) as $id => $_) {
+        $videos[$id]['privacy'] = 'unlisted';
+    }
     if (!$videos) {
         $why = [];
         if ($skipped['private'] > 0) {
